@@ -5,22 +5,23 @@ import {
   setDoc,
   serverTimestamp,
 } from "firebase/firestore";
-import { auth, db } from "../lib/firebaseClient";
+import { db } from "../lib/firebaseClient";
 import { supabase } from "../lib/supabaseClient";
 
 type BuracoNaRuaProps = {
-  onBack: () => void; // obrigatório
+  onBack: () => void;
 };
 
-type BuracoFormData = {
-  protocolo: string;
-  ordemServico: string;
-  bairro: string;
-  rua: string;
-  numero: string;
-  pontoReferencia: string;
-  observacoes: string;
+type FotoAnexada = {
+  id: string;
+  url: string;
+  timestamp: string;
+  file: File;
 };
+
+type StatusType = "success" | "error" | "info";
+
+const STORAGE_BUCKET = "os-arquivos";
 
 type CampoForm =
   | "protocolo"
@@ -28,422 +29,349 @@ type CampoForm =
   | "bairro"
   | "rua"
   | "numero"
-  | "pontoReferencia"
+  | "referencia"
   | "observacoes";
 
 const LABELS_CAMPOS: Record<CampoForm, string> = {
   protocolo: "Protocolo",
-  ordemServico: "Ordem de serviço",
+  ordemServico: "Ordem de Serviço",
   bairro: "Bairro",
   rua: "Rua / Avenida",
   numero: "Número",
-  pontoReferencia: "Ponto de referência",
+  referencia: "Ponto de referência",
   observacoes: "Observações",
 };
 
-type NaoDeclaradoState = Record<CampoForm, boolean>;
-
-type FotoItem = {
-  file: File;
-  url: string; // URL gerada via URL.createObjectURL
-  uploadedUrl?: string; // URL pública no Supabase (após upload)
-};
-
-type StatusType = "success" | "error" | "info" | null;
-
 const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
-  const [formData, setFormData] = useState<BuracoFormData>({
-    protocolo: "",
-    ordemServico: "",
-    bairro: "",
-    rua: "",
-    numero: "",
-    pontoReferencia: "",
-    observacoes: "",
-  });
+  const [protocolo, setProtocolo] = useState("");
+  const [ordemServico, setOrdemServico] = useState("");
+  const [bairro, setBairro] = useState("");
+  const [rua, setRua] = useState("");
+  const [numero, setNumero] = useState("");
+  const [referencia, setReferencia] = useState("");
+  const [observacoes, setObservacoes] = useState("");
 
-  const [naoDeclarado, setNaoDeclarado] = useState<NaoDeclaradoState>({
+  const [naoDeclarado, setNaoDeclarado] = useState<Record<CampoForm, boolean>>({
     protocolo: false,
-    ordemServico: false,
+    ordemServico: false, // mantido no state, mas não usamos mais na UI
     bairro: false,
     rua: false,
     numero: false,
-    pontoReferencia: false,
+    referencia: false,
     observacoes: false,
   });
 
-  const [fotos, setFotos] = useState<FotoItem[]>([]);
-  const [selectedFoto, setSelectedFoto] = useState<FotoItem | null>(null);
+  const [fotos, setFotos] = useState<FotoAnexada[]>([]);
+  const [fotoEmPreview, setFotoEmPreview] = useState<FotoAnexada | null>(null);
 
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const [statusType, setStatusType] = useState<StatusType>(null);
+  const [statusType, setStatusType] = useState<StatusType>("info");
 
-  const [campoEmEdicao, setCampoEmEdicao] = useState<CampoForm | null>(null);
-  const [holdNaoDeclarado, setHoldNaoDeclarado] = useState(false);
+  const [showConfirmSave, setShowConfirmSave] = useState(false);
+  const [showConfirmClear, setShowConfirmClear] = useState(false);
 
-  const [showConfirmModal, setShowConfirmModal] = useState(false);
-  const [pendingNaoDeclaradoField, setPendingNaoDeclaradoField] =
-    useState<CampoForm | null>(null);
-
-  const [showClearConfirmModal, setShowClearConfirmModal] = useState(false);
-
+  // Modal de resultado (sucesso/erro ao salvar)
   const [showResultModal, setShowResultModal] = useState(false);
-  const [resultModalType, setResultModalType] = useState<StatusType>(null);
-  const [resultModalMessage, setResultModalMessage] = useState("");
+  const [resultType, setResultType] = useState<"success" | "error">("success");
+  const [resultMessage, setResultMessage] = useState("");
 
-  const [erroCamposObrigatorios, setErroCamposObrigatorios] = useState(false);
-
-  function showStatus(message: string, type: StatusType, useModal = false) {
-    if (useModal) {
-      setResultModalMessage(message);
-      setResultModalType(type);
-      setShowResultModal(true);
-    } else {
-      setStatusMessage(message);
-      setStatusType(type);
-      setTimeout(() => {
-        setStatusMessage(null);
-      }, 4000);
-    }
+  function setStatus(msg: string, type: StatusType = "info") {
+    setStatusMessage(msg);
+    setStatusType(type);
   }
 
-  const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
-    const files = event.target.files;
-    if (!files) return;
+  function handleInputChange(campo: CampoForm, value: string) {
+    const upper = value.toLocaleUpperCase("pt-BR");
 
-    const filesArray = Array.from(files);
-
-    const validFiles: File[] = [];
-    for (const file of filesArray) {
-      if (file.type === "image/jpeg" || file.type === "image/png") {
-        validFiles.push(file);
-      } else {
-        showStatus(
-          `O arquivo "${file.name}" não é uma imagem válida (apenas JPEG ou PNG).`,
-          "error"
-        );
-      }
+    switch (campo) {
+      case "protocolo":
+        setProtocolo(upper);
+        break;
+      case "ordemServico":
+        setOrdemServico(upper);
+        break;
+      case "bairro":
+        setBairro(upper);
+        break;
+      case "rua":
+        setRua(upper);
+        break;
+      case "numero":
+        setNumero(upper);
+        break;
+      case "referencia":
+        setReferencia(upper);
+        break;
+      case "observacoes":
+        setObservacoes(upper);
+        break;
     }
 
-    const fotoItems: FotoItem[] = validFiles.map((file) => ({
-      file,
-      url: URL.createObjectURL(file),
-    }));
-
-    setFotos((prev) => [...prev, ...fotoItems]);
-
-    if (!selectedFoto && fotoItems.length > 0) {
-      setSelectedFoto(fotoItems[0]);
-    }
-
-    event.target.value = "";
-  };
-
-  const handleFotoClick = (foto: FotoItem) => {
-    setSelectedFoto(foto);
-  };
-
-  const handleRemoveFoto = (foto: FotoItem) => {
-    URL.revokeObjectURL(foto.url);
-
-    setFotos((prev) => prev.filter((f) => f !== foto));
-
-    setSelectedFoto((prevSelected) =>
-      prevSelected && prevSelected === foto ? null : prevSelected
-    );
-  };
-
-  const handleRemoveAllFotos = () => {
-    fotos.forEach((foto) => URL.revokeObjectURL(foto.url));
-    setFotos([]);
-    setSelectedFoto(null);
-  };
-
-  const handleBlurField = (campo: CampoForm) => {
-    setCampoEmEdicao((current) => (current === campo ? null : current));
-  };
-
-  const handleEditField = (campo: CampoForm) => {
-    if (holdNaoDeclarado) {
-      setCampoEmEdicao(campo);
-      return;
-    }
-
+    // se digitou algo, desmarca "não declarado"
     setNaoDeclarado((prev) => ({
       ...prev,
       [campo]: false,
     }));
-    setCampoEmEdicao(campo);
-  };
+  }
 
-  const handleChangeCampo =
-    (campo: CampoForm) => (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-      const novoValor = e.target.value;
-
-      setFormData((prev) => ({
-        ...prev,
-        [campo]: novoValor,
-      }));
-
-      if (novoValor.trim().length > 0) {
-        setNaoDeclarado((prev) => ({
-          ...prev,
-          [campo]: false,
-        }));
-      }
-    };
-
-  const handleChangeNaoDeclarado = (campo: CampoForm) => {
-    if (!holdNaoDeclarado) {
-      setPendingNaoDeclaradoField(campo);
-      setShowConfirmModal(true);
-      return;
-    }
-
+  function toggleNaoDeclarado(campo: CampoForm) {
     setNaoDeclarado((prev) => {
       const novoValor = !prev[campo];
 
-      const newState = {
+      if (novoValor) {
+        // se marcou "não declarado", limpa o campo
+        switch (campo) {
+          case "protocolo":
+            setProtocolo("");
+            break;
+          case "ordemServico":
+            setOrdemServico("");
+            break;
+          case "bairro":
+            setBairro("");
+            break;
+          case "rua":
+            setRua("");
+            break;
+          case "numero":
+            setNumero("");
+            break;
+          case "referencia":
+            setReferencia("");
+            break;
+          case "observacoes":
+            setObservacoes("");
+            break;
+        }
+      }
+
+      return {
         ...prev,
         [campo]: novoValor,
       };
-
-      if (novoValor) {
-        setFormData((prevData) => ({
-          ...prevData,
-          [campo]: "",
-        }));
-      }
-
-      return newState;
     });
+  }
 
-    setCampoEmEdicao(null);
-  };
+  function handleFotosChange(e: ChangeEvent<HTMLInputElement>) {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
 
-  const handleConfirmNaoDeclarado = (confirm: boolean) => {
-    if (!pendingNaoDeclaradoField) {
-      setShowConfirmModal(false);
+    const arquivos = Array.from(files);
+    const apenasImagens = arquivos.filter((file) =>
+      file.type.startsWith("image/")
+    );
+
+    if (apenasImagens.length === 0) {
+      setStatus("Apenas arquivos de imagem são permitidos.", "error");
+      e.target.value = "";
       return;
     }
 
-    if (confirm) {
-      setHoldNaoDeclarado(true);
-
-      const campo = pendingNaoDeclaradoField;
-      setNaoDeclarado((prev) => {
-        const novoValor = !prev[campo];
-        const newState = {
-          ...prev,
-          [campo]: novoValor,
-        };
-
-        if (novoValor) {
-          setFormData((prevData) => ({
-            ...prevData,
-            [campo]: "",
-          }));
-        }
-
-        return newState;
-      });
-
-      setCampoEmEdicao(null);
-    }
-
-    setPendingNaoDeclaradoField(null);
-    setShowConfirmModal(false);
-  };
-
-  const handleClearHoldNaoDeclarado = () => {
-    setHoldNaoDeclarado(false);
-    setPendingNaoDeclaradoField(null);
-  };
-
-  const handleClear = (showInfo: boolean = true) => {
-    setFormData({
-      protocolo: "",
-      ordemServico: "",
-      bairro: "",
-      rua: "",
-      numero: "",
-      pontoReferencia: "",
-      observacoes: "",
+    const agora = new Date();
+    const timestampStr = agora.toLocaleString("pt-BR", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
     });
 
+    apenasImagens.forEach((file) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const url = reader.result as string;
+        setFotos((prev) => [
+          ...prev,
+          {
+            id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+            url,
+            timestamp: timestampStr,
+            file,
+          },
+        ]);
+      };
+      reader.readAsDataURL(file);
+    });
+
+    e.target.value = "";
+    setStatus("Foto(s) anexada(s) com sucesso.", "success");
+  }
+
+  function handleOpenPreview(foto: FotoAnexada) {
+    setFotoEmPreview(foto);
+  }
+
+  function handleClosePreview() {
+    setFotoEmPreview(null);
+  }
+
+  function handleExcluirFoto(id: string) {
+    setFotos((prev) => prev.filter((f) => f.id !== id));
+    setFotoEmPreview(null);
+    setStatus("Foto removida.", "info");
+  }
+
+  // showInfo: se false, não mostra "Formulário limpo."
+  function handleClear(showInfo: boolean = true) {
+    setProtocolo("");
+    setOrdemServico("");
+    setBairro("");
+    setRua("");
+    setNumero("");
+    setReferencia("");
+    setObservacoes("");
+    setFotos([]);
+    setFotoEmPreview(null);
     setNaoDeclarado({
       protocolo: false,
       ordemServico: false,
       bairro: false,
       rua: false,
       numero: false,
-      pontoReferencia: false,
+      referencia: false,
       observacoes: false,
     });
 
-    fotos.forEach((foto) => URL.revokeObjectURL(foto.url));
-    setFotos([]);
-    setSelectedFoto(null);
-
-    setStatusMessage(null);
-    setStatusType(null);
-
-    setErroCamposObrigatorios(false);
-
     if (showInfo) {
-      showStatus("Formulário limpo com sucesso.", "info");
+      setStatus("Formulário limpo.", "info");
     }
-  };
+  }
 
-  const handleSubmit = async (event: FormEvent) => {
-    event.preventDefault();
-    setErroCamposObrigatorios(false);
+  async function handleSave() {
+    setStatusMessage(null);
 
-    const obrigatorios: CampoForm[] = [
-      "bairro",
-      "rua",
-      "numero",
-      "pontoReferencia",
-    ];
+    const erros: string[] = [];
 
-    const faltaAlgumObrigatorio = obrigatorios.some((campo) => {
-      const valor = formData[campo].trim();
-      const nd = naoDeclarado[campo];
+    const valores: Record<CampoForm, string> = {
+      protocolo,
+      ordemServico,
+      bairro,
+      rua,
+      numero,
+      referencia,
+      observacoes,
+    };
 
-      return !nd && valor.length === 0;
+    // 1) Ordem de Serviço OBRIGATÓRIA (sem "não declarado")
+    if (!ordemServico.trim()) {
+      erros.push("Preencha o campo Ordem de Serviço (obrigatório).");
+    }
+
+    // 2) Demais campos seguem regra: valor OU "não declarado"
+    (Object.keys(valores) as CampoForm[]).forEach((campo) => {
+      if (campo === "ordemServico") return; // já validado acima
+
+      const valor = valores[campo].trim();
+      const marcado = naoDeclarado[campo];
+
+      if (!valor && !marcado) {
+        erros.push(
+          `Preencha o campo ${LABELS_CAMPOS[campo]} ou marque "NÃO DECLARADO PELO CADASTRANTE".`
+        );
+      }
     });
 
-    if (faltaAlgumObrigatorio) {
-      setErroCamposObrigatorios(true);
-      showStatus("Preencha todos os campos obrigatórios.", "error");
+    if (erros.length > 0) {
+      setStatus(erros.join(" "), "error");
       return;
     }
 
-    setIsSubmitting(true);
-    setStatusMessage(null);
-    setStatusType(null);
-
     try {
-      const user = auth.currentUser;
-      if (!user || !user.email) {
-        throw new Error("Usuário não autenticado ou sem e-mail.");
-      }
+      setSaving(true);
 
-      if (!formData.bairro || !formData.rua || !formData.numero) {
-        console.warn(
-          "Campos de endereço incompletos. Continuando, mas atenção ao registro."
-        );
-      }
+      const ordensRef = collection(db, "ordensServico");
+      const ordemRef = doc(ordensRef);
 
-      const protocoloSeg = formData.protocolo.trim().replace(/\//g, "_") || "sem_protocolo";
-      const osSeg = formData.ordemServico.trim().replace(/\//g, "_") || "sem_os";
-      const now = new Date();
-      const timestamp = now.getTime();
+      // 1) Upload fotos Supabase (opcional)
+      const fotosData: {
+        id: string;
+        nomeArquivo: string;
+        dataAnexoTexto: string;
+        url: string;
+      }[] = [];
 
-      const docId = `${protocoloSeg}_${osSeg}_${timestamp}`;
+      for (const foto of fotos) {
+        const path = `calcamento/${ordemRef.id}/fotos/${foto.id}-${foto.file.name}`;
 
-      const fotosUrls: string[] = [];
+        const { error: uploadError } = await supabase.storage
+          .from(STORAGE_BUCKET)
+          .upload(path, foto.file, { upsert: true });
 
-      if (fotos.length > 0) {
-        for (const foto of fotos) {
-          const storagePath = `buraco_na_rua/${docId}/${foto.file.name.replace(
-            /\s+/g,
-            "_"
-          )}`;
-
-          const { data: uploadData, error: uploadError } = await supabase.storage
-            .from("sanear-fotos")
-            .upload(storagePath, foto.file);
-
-          if (uploadError) {
-            console.error("Erro no upload da foto:", uploadError);
-            throw new Error("Erro ao fazer upload das imagens.");
-          }
-
-          if (!uploadData?.path) {
-            console.warn(
-              "Upload retornou sucesso, mas sem 'path'. Verifique configuração do bucket."
-            );
-            continue;
-          }
-
-          const { data: publicUrlData } = supabase.storage
-            .from("sanear-fotos")
-            .getPublicUrl(uploadData.path);
-
-          if (!publicUrlData?.publicUrl) {
-            console.warn(
-              "Não foi possível obter a URL pública da imagem. Verifique as configurações do bucket."
-            );
-            continue;
-          }
-
-          fotosUrls.push(publicUrlData.publicUrl);
+        if (uploadError) {
+          console.error(uploadError);
+          throw new Error(
+            `Erro ao enviar foto "${foto.file.name}" para o armazenamento.`
+          );
         }
+
+        const { data: publicData } = supabase.storage
+          .from(STORAGE_BUCKET)
+          .getPublicUrl(path);
+
+        fotosData.push({
+          id: foto.id,
+          nomeArquivo: foto.file.name,
+          dataAnexoTexto: foto.timestamp,
+          url: publicData.publicUrl,
+        });
       }
 
-      const docRef = doc(collection(db, "ordens_servico_buraco_na_rua"), docId);
-
-      const firestorePayload = {
-        protocolo: formData.protocolo || null,
-        protocoloNaoDeclarado: naoDeclarado.protocolo || false,
-
-        ordemServico: formData.ordemServico || null,
-        ordemServicoNaoDeclarado: naoDeclarado.ordemServico || false,
-
-        bairro: formData.bairro || null,
-        bairroNaoDeclarado: naoDeclarado.bairro || false,
-
-        rua: formData.rua || null,
-        ruaNaoDeclarado: naoDeclarado.rua || false,
-
-        numero: formData.numero || null,
-        numeroNaoDeclarado: naoDeclarado.numero || false,
-
-        pontoReferencia: formData.pontoReferencia || null,
-        pontoReferenciaNaoDeclarado: naoDeclarado.pontoReferencia || false,
-
-        observacoes: formData.observacoes || null,
-        observacoesNaoDeclarado: naoDeclarado.observacoes || false,
-
-        fotosUrls,
-        userEmail: user.email,
+      // 2) Salvar Firestore (sem mais campos de PDF)
+      await setDoc(ordemRef, {
+        tipo: "CALCAMENTO",
+        protocolo: protocolo.trim() || null,
+        ordemServico: ordemServico.trim() || null,
+        bairro: bairro.trim() || null,
+        rua: rua.trim() || null,
+        numero: numero.trim() || null,
+        referencia: referencia.trim() || null,
+        observacoes: observacoes.trim() || null,
+        status: "ABERTA",
         createdAt: serverTimestamp(),
-      };
+        updatedAt: serverTimestamp(),
+        fotos: fotosData,
+      });
 
-      await setDoc(docRef, firestorePayload);
-
-      showStatus("Ordem de serviço salva com sucesso!", "success", true);
-
+      // Sucesso: limpa formulário sem mostrar "Formulário limpo."
       handleClear(false);
+
+      // limpa banner e abre modal de sucesso
+      setStatusMessage(null);
+      setResultType("success");
+      setResultMessage(
+        "Ordem de serviço de Calçamento cadastrada com sucesso."
+      );
+      setShowResultModal(true);
     } catch (error: any) {
       console.error(error);
+
       const msg =
-        error?.message || "Ocorreu um erro ao salvar a ordem de serviço.";
-      showStatus(msg, "error", true);
+        error?.message ??
+        "Não foi possível salvar a OS de Calçamento. Verifique a conexão e tente novamente.";
+
+      setStatusMessage(null);
+      setResultType("error");
+      setResultMessage(msg);
+      setShowResultModal(true);
     } finally {
-      setIsSubmitting(false);
+      setSaving(false);
     }
-  };
+  }
 
   return (
-    <>
+    <section className="page-card">
       <header className="page-header">
-        <button
-          type="button"
-          className="btn-secondary page-back-button"
-          onClick={onBack}
-        >
-          Voltar para Dashboard
-        </button>
-        <div className="page-header-text">
-          <h1>Registro de OS - Calçamento (Buraco na Rua)</h1>
-          <p>
-            Preencha as informações relacionadas ao buraco aberto no
-            calçamento ou rua para registro e acompanhamento.
+        <div>
+          <h2>Cadastro de Calçamento</h2>
+          <p className="page-section-description">
+            Registre ordens de serviço relacionadas a buracos e intervenções no
+            calçamento e pavimentação de passeios.
           </p>
         </div>
+        <button type="button" className="btn-secondary" onClick={onBack}>
+          Voltar para Dashboard
+        </button>
       </header>
 
       {statusMessage && (
@@ -452,446 +380,332 @@ const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
         </div>
       )}
 
-      {erroCamposObrigatorios && (
-        <div className="status-banner status-error">
-          Existem campos obrigatórios sem preenchimento. Verifique os campos
-          sinalizados com *.
-        </div>
-      )}
-
-      <div className="layout-columns">
-        <section className="form-section">
-          <form onSubmit={handleSubmit} className="buraco-form">
-            <div className="form-row">
-              <div className="field">
-                <div className="field-label-row">
-                  <span className="field-label">
-                    {LABELS_CAMPOS.protocolo}
-                  </span>
-                  <label className="nd-check">
-                    <input
-                      type="checkbox"
-                      checked={naoDeclarado.protocolo}
-                      onChange={() => handleChangeNaoDeclarado("protocolo")}
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                    Não declarada
-                  </label>
-                </div>
-
-                {!naoDeclarado.protocolo && (
-                  <div className="input-wrapper">
-                    <input
-                      type="text"
-                      placeholder="Ex.: 2025/000123"
-                      value={formData.protocolo}
-                      onChange={handleChangeCampo("protocolo")}
-                      onBlur={() => handleBlurField("protocolo")}
-                      onFocus={() => handleEditField("protocolo")}
-                      disabled={holdNaoDeclarado && !campoEmEdicao}
-                    />
-                    {campoEmEdicao !== "protocolo" && (
-                      <button
-                        type="button"
-                        className="edit-button"
-                        onClick={() => handleEditField("protocolo")}
-                      >
-                        ✏️
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              <div className="field">
-                <div className="field-label-row">
-                  <span className="field-label">
-                    {LABELS_CAMPOS.ordemServico}
-                  </span>
-                  <label className="nd-check">
-                    <input
-                      type="checkbox"
-                      checked={naoDeclarado.ordemServico}
-                      onChange={() => handleChangeNaoDeclarado("ordemServico")}
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                    Não declarada
-                  </label>
-                </div>
-
-                {!naoDeclarado.ordemServico && (
-                  <div className="input-wrapper">
-                    <input
-                      type="text"
-                      placeholder="Ex.: OS-2025-00456"
-                      value={formData.ordemServico}
-                      onChange={handleChangeCampo("ordemServico")}
-                      onBlur={() => handleBlurField("ordemServico")}
-                      onFocus={() => handleEditField("ordemServico")}
-                      disabled={holdNaoDeclarado && !campoEmEdicao}
-                    />
-                    {campoEmEdicao !== "ordemServico" && (
-                      <button
-                        type="button"
-                        className="edit-button"
-                        onClick={() => handleEditField("ordemServico")}
-                      >
-                        ✏️
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="form-row">
-              <div className="field field-half">
-                <div className="field-label-row">
-                  <span className="field-label">
-                    {LABELS_CAMPOS.bairro} *
-                  </span>
-                  <label className="nd-check">
-                    <input
-                      type="checkbox"
-                      checked={naoDeclarado.bairro}
-                      onChange={() => handleChangeNaoDeclarado("bairro")}
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                    Não declarada
-                  </label>
-                </div>
-
-                {!naoDeclarado.bairro && (
-                  <div className="input-wrapper">
-                    <input
-                      type="text"
-                      placeholder="Nome do bairro"
-                      value={formData.bairro}
-                      onChange={handleChangeCampo("bairro")}
-                      onBlur={() => handleBlurField("bairro")}
-                      onFocus={() => handleEditField("bairro")}
-                      disabled={holdNaoDeclarado && !campoEmEdicao}
-                    />
-                    {campoEmEdicao !== "bairro" && (
-                      <button
-                        type="button"
-                        className="edit-button"
-                        onClick={() => handleEditField("bairro")}
-                      >
-                        ✏️
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              <div className="field field-half">
-                <div className="field-label-row">
-                  <span className="field-label">
-                    {LABELS_CAMPOS.rua} *
-                  </span>
-                  <label className="nd-check">
-                    <input
-                      type="checkbox"
-                      checked={naoDeclarado.rua}
-                      onChange={() => handleChangeNaoDeclarado("rua")}
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                    Não declarada
-                  </label>
-                </div>
-
-                {!naoDeclarado.rua && (
-                  <div className="input-wrapper">
-                    <input
-                      type="text"
-                      placeholder="Rua ou Avenida"
-                      value={formData.rua}
-                      onChange={handleChangeCampo("rua")}
-                      onBlur={() => handleBlurField("rua")}
-                      onFocus={() => handleEditField("rua")}
-                      disabled={holdNaoDeclarado && !campoEmEdicao}
-                    />
-                    {campoEmEdicao !== "rua" && (
-                      <button
-                        type="button"
-                        className="edit-button"
-                        onClick={() => handleEditField("rua")}
-                      >
-                        ✏️
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="form-row">
-              <div className="field field-small">
-                <div className="field-label-row">
-                  <span className="field-label">
-                    {LABELS_CAMPOS.numero} *
-                  </span>
-                  <label className="nd-check">
-                    <input
-                      type="checkbox"
-                      checked={naoDeclarado.numero}
-                      onChange={() => handleChangeNaoDeclarado("numero")}
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                    Não declarada
-                  </label>
-                </div>
-
-                {!naoDeclarado.numero && (
-                  <div className="input-wrapper">
-                    <input
-                      type="text"
-                      placeholder="Nº"
-                      value={formData.numero}
-                      onChange={handleChangeCampo("numero")}
-                      onBlur={() => handleBlurField("numero")}
-                      onFocus={() => handleEditField("numero")}
-                      disabled={holdNaoDeclarado && !campoEmEdicao}
-                    />
-                    {campoEmEdicao !== "numero" && (
-                      <button
-                        type="button"
-                        className="edit-button"
-                        onClick={() => handleEditField("numero")}
-                      >
-                        ✏️
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              <div className="field">
-                <div className="field-label-row">
-                  <span className="field-label">
-                    {LABELS_CAMPOS.pontoReferencia} *
-                  </span>
-                  <label className="nd-check">
-                    <input
-                      type="checkbox"
-                      checked={naoDeclarado.pontoReferencia}
-                      onChange={() => handleChangeNaoDeclarado("pontoReferencia")}
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                    Não declarada
-                  </label>
-                </div>
-
-                {!naoDeclarado.pontoReferencia && (
-                  <div className="input-wrapper">
-                    <input
-                      type="text"
-                      placeholder="Ponto de referência próximo"
-                      value={formData.pontoReferencia}
-                      onChange={handleChangeCampo("pontoReferencia")}
-                      onBlur={() => handleBlurField("pontoReferencia")}
-                      onFocus={() => handleEditField("pontoReferencia")}
-                      disabled={holdNaoDeclarado && !campoEmEdicao}
-                    />
-                    {campoEmEdicao !== "pontoReferencia" && (
-                      <button
-                        type="button"
-                        className="edit-button"
-                        onClick={() => handleEditField("pontoReferencia")}
-                      >
-                        ✏️
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="form-row">
-              <div className="field">
-                <div className="field-label-row">
-                  <span className="field-label">
-                    {LABELS_CAMPOS.observacoes}
-                  </span>
-                  <label className="nd-check">
-                    <input
-                      type="checkbox"
-                      checked={naoDeclarado.observacoes}
-                      onChange={() => handleChangeNaoDeclarado("observacoes")}
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                    Não declarada
-                  </label>
-                </div>
-
-                {!naoDeclarado.observacoes && (
-                  <div className="input-wrapper">
-                    <textarea
-                      placeholder="Descreva detalhes adicionais sobre o buraco, riscos, fluxo de veículos, etc."
-                      value={formData.observacoes}
-                      onChange={handleChangeCampo("observacoes")}
-                      onBlur={() => handleBlurField("observacoes")}
-                      onFocus={() => handleEditField("observacoes")}
-                      disabled={holdNaoDeclarado && !campoEmEdicao}
-                      rows={5}
-                    />
-                    {campoEmEdicao !== "observacoes" && (
-                      <button
-                        type="button"
-                        className="edit-button"
-                        onClick={() => handleEditField("observacoes")}
-                      >
-                        ✏️
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="form-actions">
-              <button
-                type="button"
-                className="btn-secondary"
-                onClick={() => setShowClearConfirmModal(true)}
-                disabled={isSubmitting}
-              >
-                Limpar formulário
-              </button>
-
-              <button
-                type="submit"
-                className="btn-primary"
-                disabled={isSubmitting}
-              >
-                {isSubmitting ? "Salvando..." : "Salvar OS"}
-              </button>
-            </div>
-          </form>
-        </section>
-
-        <section className="photos-section">
-          <h2>Fotos do local</h2>
-          <p className="field-hint">
-            Adicione fotos para facilitar a identificação do problema e a
-            conferência da execução. Somente arquivos JPEG e PNG são aceitos.
+      <form
+        className="page-form"
+        onSubmit={(e: FormEvent<HTMLFormElement>) => e.preventDefault()}
+      >
+        {/* Identificação */}
+        <div className="page-section">
+          <h3>Identificação da OS</h3>
+          <p className="page-section-description">
+            Dados principais da ordem de serviço de Calçamento.
           </p>
 
-          <div className="upload-area">
-            <label className="upload-label">
+          <div className="page-form-grid">
+            <div className="page-field">
+              <label>Protocolo</label>
+              <input
+                type="text"
+                value={protocolo}
+                onChange={(e) => handleInputChange("protocolo", e.target.value)}
+                placeholder="NÚMERO DO PROTOCOLO"
+                disabled={naoDeclarado.protocolo}
+              />
+              <label className="field-hint">
+                <input
+                  type="checkbox"
+                  checked={naoDeclarado.protocolo}
+                  onChange={() => toggleNaoDeclarado("protocolo")}
+                />{" "}
+                NÃO DECLARADO PELO CADASTRANTE
+              </label>
+            </div>
+
+            <div className="page-field">
+              <label>
+                Ordem de Serviço{" "}
+                <span style={{ color: "var(--danger, #b91c1c)" }}>*</span>
+              </label>
+              <input
+                type="text"
+                value={ordemServico}
+                onChange={(e) =>
+                  handleInputChange("ordemServico", e.target.value)
+                }
+                placeholder="NÚMERO DA OS (OBRIGATÓRIO)"
+              />
+              <p className="field-hint">Campo obrigatório.</p>
+            </div>
+          </div>
+        </div>
+
+        {/* Local */}
+        <div className="page-section">
+          <h3>Local do serviço</h3>
+          <p className="page-section-description">
+            Informe onde o serviço de calçamento precisa ser executado.
+          </p>
+
+          <div className="page-form-grid">
+            <div className="page-field">
+              <label>Bairro</label>
+              <input
+                type="text"
+                value={bairro}
+                onChange={(e) => handleInputChange("bairro", e.target.value)}
+                placeholder="BAIRRO"
+                disabled={naoDeclarado.bairro}
+              />
+              <label className="field-hint">
+                <input
+                  type="checkbox"
+                  checked={naoDeclarado.bairro}
+                  onChange={() => toggleNaoDeclarado("bairro")}
+                />{" "}
+                NÃO DECLARADO PELO CADASTRANTE
+              </label>
+            </div>
+
+            <div className="page-field">
+              <label>Rua / Avenida</label>
+              <input
+                type="text"
+                value={rua}
+                onChange={(e) => handleInputChange("rua", e.target.value)}
+                placeholder="NOME DA RUA OU AVENIDA"
+                disabled={naoDeclarado.rua}
+              />
+              <label className="field-hint">
+                <input
+                  type="checkbox"
+                  checked={naoDeclarado.rua}
+                  onChange={() => toggleNaoDeclarado("rua")}
+                />{" "}
+                NÃO DECLARADO PELO CADASTRANTE
+              </label>
+            </div>
+
+            <div className="page-field">
+              <label>Número</label>
+              <input
+                type="text"
+                value={numero}
+                onChange={(e) => handleInputChange("numero", e.target.value)}
+                placeholder="Nº"
+                disabled={naoDeclarado.numero}
+              />
+              <label className="field-hint">
+                <input
+                  type="checkbox"
+                  checked={naoDeclarado.numero}
+                  onChange={() => toggleNaoDeclarado("numero")}
+                />{" "}
+                NÃO DECLARADO PELO CADASTRANTE
+              </label>
+            </div>
+
+            <div className="page-field">
+              <label>Ponto de referência</label>
+              <input
+                type="text"
+                value={referencia}
+                onChange={(e) =>
+                  handleInputChange("referencia", e.target.value)
+                }
+                placeholder="PRÓXIMO A..., EM FRENTE A..."
+                disabled={naoDeclarado.referencia}
+              />
+              <label className="field-hint">
+                <input
+                  type="checkbox"
+                  checked={naoDeclarado.referencia}
+                  onChange={() => toggleNaoDeclarado("referencia")}
+                />{" "}
+                NÃO DECLARADO PELO CADASTRANTE
+              </label>
+            </div>
+          </div>
+        </div>
+
+        {/* Observações */}
+        <div className="page-section">
+          <h3>Observações importantes</h3>
+          <p className="page-section-description">
+            Detalhes que ajudem a equipe a entender melhor a condição do
+            calçamento, acesso de máquinas, bloqueios de via, etc.
+          </p>
+
+          <div className="page-field">
+            <label>Observações</label>
+            <textarea
+              value={observacoes}
+              onChange={(e) =>
+                handleInputChange("observacoes", e.target.value)
+              }
+              placeholder="EX.: TRECHO COM GRANDE FLUXO, NECESSÁRIO APOIO DA GUARDA, BURACO PROFUNDO, RISCO PARA PEDESTRES..."
+              disabled={naoDeclarado.observacoes}
+            />
+            <label className="field-hint">
+              <input
+                type="checkbox"
+                checked={naoDeclarado.observacoes}
+                onChange={() => toggleNaoDeclarado("observacoes")}
+              />{" "}
+              NÃO DECLARADO PELO CADASTRANTE
+            </label>
+          </div>
+        </div>
+
+        {/* Fotos */}
+        <div className="page-section">
+          <h3>Fotos do local</h3>
+          <p className="page-section-description">
+            Anexe fotos da situação atual do calçamento (opcional). Clique em
+            uma foto para ampliar e ter opção de exclusão.
+          </p>
+
+          <div className="page-photos-block">
+            <div className="page-field photo-upload">
+              <label>Anexar fotos</label>
               <input
                 type="file"
-                accept="image/jpeg,image/png"
+                accept="image/*"
                 multiple
-                onChange={handleFileChange}
+                onChange={handleFotosChange}
               />
-              <span>Selecionar fotos</span>
-            </label>
+              <p className="photo-hint">
+                Você pode selecionar uma ou várias imagens. Somente arquivos de
+                imagem são permitidos. Campo opcional.
+              </p>
+            </div>
 
             {fotos.length > 0 && (
-              <button
-                type="button"
-                className="btn-secondary"
-                onClick={handleRemoveAllFotos}
-              >
-                Remover todas
-              </button>
+              <>
+                <p className="field-hint">
+                  Clique em uma foto para abrir a pré-visualização com a opção
+                  de excluir somente aquela imagem.
+                </p>
+                <div className="photo-preview-grid">
+                  {fotos.map((foto) => (
+                    <div
+                      key={foto.id}
+                      className="photo-preview-item"
+                      onClick={() => handleOpenPreview(foto)}
+                    >
+                      <img src={foto.url} alt="Foto anexada" />
+                      <span className="photo-timestamp">
+                        {foto.timestamp}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </>
             )}
           </div>
+        </div>
 
-          {fotos.length > 0 ? (
-            <div className="photos-grid">
-              <div className="photo-preview">
-                {selectedFoto ? (
-                  <img
-                    src={selectedFoto.url}
-                    alt={selectedFoto.file.name}
-                    className="photo-preview-image"
-                  />
-                ) : (
-                  <div className="photo-preview-placeholder">
-                    Selecione uma miniatura ao lado para visualizar.
-                  </div>
-                )}
-              </div>
+        {/* Botões */}
+        <div className="page-actions">
+          <button
+            type="button"
+            className="btn-primary btn-save"
+            disabled={saving}
+            onClick={() => setShowConfirmSave(true)}
+          >
+            {saving ? "Salvando..." : "Salvar OS"}
+          </button>
+          <button
+            type="button"
+            className="btn-secondary btn-clear"
+            disabled={saving}
+            onClick={() => setShowConfirmClear(true)}
+          >
+            Limpar
+          </button>
+        </div>
+      </form>
 
-              <div className="photo-thumbs">
-                {fotos.map((foto, index) => (
-                  <div
-                    key={`${foto.url}-${index}`}
-                    className={`photo-thumb ${
-                      selectedFoto === foto ? "selected" : ""
-                    }`}
-                    onClick={() => handleFotoClick(foto)}
-                  >
-                    <img
-                      src={foto.url}
-                      alt={foto.file.name}
-                      className="photo-thumb-image"
-                    />
-                    <button
-                      type="button"
-                      className="photo-thumb-remove"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleRemoveFoto(foto);
-                      }}
-                    >
-                      ×
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : (
-            <div className="no-photos">
-              Nenhuma foto adicionada ainda. Clique em "Selecionar fotos" para
-              anexar imagens do local.
-            </div>
-          )}
-        </section>
-      </div>
-
-      {showConfirmModal && (
-        <div
-          className="modal-backdrop"
-          onClick={() => handleConfirmNaoDeclarado(false)}
-        >
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
+      {/* MODAL DE PRÉ-VISUALIZAÇÃO DA FOTO */}
+      {fotoEmPreview && (
+        <div className="modal-backdrop" onClick={handleClosePreview}>
+          <div
+            className="modal modal-photo"
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="modal-header">
-              <h3 className="modal-title">Confirmar "Não declarada"</h3>
+              <h3 className="modal-title">Pré-visualização da foto</h3>
               <button
                 type="button"
                 className="modal-close"
-                onClick={() => handleConfirmNaoDeclarado(false)}
+                onClick={handleClosePreview}
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="modal-body modal-photo-body">
+              <img
+                src={fotoEmPreview.url}
+                alt="Foto anexada"
+                style={{
+                  width: "100%",
+                  maxHeight: "70vh",
+                  objectFit: "contain",
+                  borderRadius: "0.75rem",
+                }}
+              />
+              <p className="field-hint">
+                Anexada em {fotoEmPreview.timestamp}
+              </p>
+            </div>
+
+            <div className="modal-footer">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={handleClosePreview}
+              >
+                Fechar
+              </button>
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => handleExcluirFoto(fotoEmPreview.id)}
+              >
+                Excluir esta foto
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL CONFIRMAR SALVAR */}
+      {showConfirmSave && (
+        <div
+          className="modal-backdrop"
+          onClick={() => !saving && setShowConfirmSave(false)}
+        >
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3 className="modal-title">Confirmar salvamento</h3>
+              <button
+                type="button"
+                className="modal-close"
+                onClick={() => !saving && setShowConfirmSave(false)}
               >
                 ×
               </button>
             </div>
             <div className="modal-body">
-              <p>
-                Marcar um campo como <strong>"Não declarada"</strong> significa
-                que essa informação não foi fornecida pelo solicitante ou não se
-                aplica à situação.
-              </p>
-              <p className="field-hint">
-                Você poderá alterar esse status mais tarde, se necessário. Esta
-                confirmação será válida até você atualizar a página.
-              </p>
+              <p>Tem certeza que deseja salvar esta ordem de serviço?</p>
             </div>
             <div className="modal-footer">
               <button
                 type="button"
                 className="btn-secondary"
-                onClick={() => handleConfirmNaoDeclarado(false)}
+                onClick={() => setShowConfirmSave(false)}
+                disabled={saving}
               >
                 Cancelar
               </button>
               <button
                 type="button"
-                className="btn-primary"
-                onClick={() => handleConfirmNaoDeclarado(true)}
+                className="btn-primary btn-save"
+                onClick={async () => {
+                  setShowConfirmSave(false);
+                  await handleSave();
+                }}
+                disabled={saving}
               >
                 Confirmar
               </button>
@@ -900,68 +714,52 @@ const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
         </div>
       )}
 
-      {holdNaoDeclarado && (
-        <div className="hold-banner">
-          Atenção: atualmente marcando campos como{" "}
-          <strong>"Não declarada"</strong> sem novas confirmações.{" "}
-          <button
-            type="button"
-            className="link-button"
-            onClick={handleClearHoldNaoDeclarado}
-          >
-            Desativar este modo
-          </button>
-        </div>
-      )}
-
-      {showClearConfirmModal && (
+      {/* MODAL CONFIRMAR LIMPAR */}
+      {showConfirmClear && (
         <div
           className="modal-backdrop"
-          onClick={() => setShowClearConfirmModal(false)}
+          onClick={() => setShowConfirmClear(false)}
         >
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
-              <h3 className="modal-title">Limpar formulário</h3>
+              <h3 className="modal-title">Confirmar limpeza</h3>
               <button
                 type="button"
                 className="modal-close"
-                onClick={() => setShowClearConfirmModal(false)}
+                onClick={() => setShowConfirmClear(false)}
               >
                 ×
               </button>
             </div>
             <div className="modal-body">
-              <p>
-                Tem certeza de que deseja limpar todos os campos do formulário?
-              </p>
-              <p className="field-hint">
-                Esta ação não pode ser desfeita. As informações preenchidas
-                serão perdidas.
-              </p>
+              <p>Tem certeza que deseja limpar todos os dados da OS?</p>
             </div>
             <div className="modal-footer">
               <button
                 type="button"
                 className="btn-secondary"
-                onClick={() => setShowClearConfirmModal(false)}
+                onClick={() => setShowConfirmClear(false)}
+                disabled={saving}
               >
                 Cancelar
               </button>
               <button
                 type="button"
-                className="btn-danger"
+                className="btn-secondary btn-clear"
                 onClick={() => {
                   handleClear();
-                  setShowClearConfirmModal(false);
+                  setShowConfirmClear(false);
                 }}
+                disabled={saving}
               >
-                Limpar tudo
+                Confirmar
               </button>
             </div>
           </div>
         </div>
       )}
 
+      {/* MODAL RESULTADO (SUCESSO / ERRO AO SALVAR) */}
       {showResultModal && (
         <div
           className="modal-backdrop"
@@ -970,11 +768,9 @@ const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <h3 className="modal-title">
-                {resultModalType === "success"
-                  ? "Sucesso"
-                  : resultModalType === "error"
-                  ? "Erro"
-                  : "Informação"}
+                {resultType === "success"
+                  ? "Cadastro salvo com sucesso"
+                  : "Erro ao salvar OS"}
               </h3>
               <button
                 type="button"
@@ -985,7 +781,7 @@ const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
               </button>
             </div>
             <div className="modal-body">
-              <p>{resultModalMessage}</p>
+              <p>{resultMessage}</p>
             </div>
             <div className="modal-footer">
               <button
@@ -999,7 +795,7 @@ const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
           </div>
         </div>
       )}
-    </>
+    </section>
   );
 };
 
