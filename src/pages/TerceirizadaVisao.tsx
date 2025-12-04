@@ -317,7 +317,7 @@ const TerceirizadaVisao: React.FC = () => {
 
   // ======= CARREGAR OS DE BURACO + ASFALTO =======
   useEffect(() => {
-    // Buraco na Rua
+    // Buraco na Rua (calçamento) – coleção ordens_servico
     const qBuraco = query(
       collection(db, "ordens_servico"),
       orderBy("createdAt", "desc")
@@ -329,16 +329,36 @@ const TerceirizadaVisao: React.FC = () => {
         const data: FirestoreOS[] = snap.docs.map((d) => {
           const raw = d.data() as any;
           const pdfNested = raw.ordemServicoPdf ?? null;
+
           return {
             id: d.id,
             origem: "buraco",
             tipo: raw.tipo || "BURACO_RUA",
             protocolo: raw.protocolo ?? null,
             ordemServico: raw.ordemServico ?? null,
-            bairro: raw.bairro ?? null,
-            rua: raw.rua ?? null,
-            numero: raw.numero ?? null,
-            pontoReferencia: raw.pontoReferencia ?? null,
+
+            // Compatibilidade: tenta primeiro os campos novos (bairro, rua, pontoReferencia),
+            // se não tiver, usa alternativas que possam existir em documentos antigos.
+            bairro:
+              raw.bairro ??
+              raw.bairroLocal ??
+              raw.bairro_os ??
+              null,
+            rua:
+              raw.rua ??
+              raw.logradouro ??
+              raw.ruaAvenida ??
+              null,
+            numero:
+              raw.numero ??
+              raw.numeroCasa ??
+              null,
+            pontoReferencia:
+              raw.pontoReferencia ??
+              raw.referencia ??
+              raw.ponto ??
+              null,
+
             observacoes: raw.observacoes ?? null,
             status: raw.status ?? null,
             createdAt: raw.createdAt ?? null,
@@ -367,7 +387,7 @@ const TerceirizadaVisao: React.FC = () => {
       }
     );
 
-    // Asfalto
+    // Asfalto – coleção ordensServico
     const qAsfalto = query(
       collection(db, "ordensServico"),
       orderBy("createdAt", "desc")
@@ -379,16 +399,35 @@ const TerceirizadaVisao: React.FC = () => {
         const data: FirestoreOS[] = snap.docs.map((d) => {
           const raw = d.data() as any;
           const pdfNested = raw.ordemServicoPdf ?? null;
+
           return {
             id: d.id,
             origem: "asfalto",
             tipo: raw.tipo || "ASFALTO",
             protocolo: raw.protocolo ?? null,
             ordemServico: raw.ordemServico ?? null,
-            bairro: raw.bairro ?? null,
-            rua: raw.rua ?? null,
-            numero: raw.numero ?? null,
-            pontoReferencia: raw.pontoReferencia ?? raw.referencia ?? null,
+
+            // Mesmo padrão de compatibilidade
+            bairro:
+              raw.bairro ??
+              raw.bairroLocal ??
+              raw.bairro_os ??
+              null,
+            rua:
+              raw.rua ??
+              raw.logradouro ??
+              raw.ruaAvenida ??
+              null,
+            numero:
+              raw.numero ??
+              raw.numeroCasa ??
+              null,
+            pontoReferencia:
+              raw.pontoReferencia ??
+              raw.referencia ??
+              raw.ponto ??
+              null,
+
             observacoes: raw.observacoes ?? null,
             status: raw.status ?? null,
             createdAt: raw.createdAt ?? null,
