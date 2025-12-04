@@ -340,23 +340,23 @@ const TerceirizadaVisao: React.FC = () => {
             // Compatibilidade: tenta primeiro os campos novos (bairro, rua, pontoReferencia),
             // se não tiver, usa alternativas que possam existir em documentos antigos.
             bairro:
-              raw.bairro ??
-              raw.bairroLocal ??
-              raw.bairro_os ??
+              raw.bairro ?? 
+              raw.bairroLocal ?? 
+              raw.bairro_os ?? 
               null,
             rua:
-              raw.rua ??
-              raw.logradouro ??
-              raw.ruaAvenida ??
+              raw.rua ?? 
+              raw.logradouro ?? 
+              raw.ruaAvenida ?? 
               null,
             numero:
-              raw.numero ??
-              raw.numeroCasa ??
+              raw.numero ?? 
+              raw.numeroCasa ?? 
               null,
             pontoReferencia:
-              raw.pontoReferencia ??
-              raw.referencia ??
-              raw.ponto ??
+              raw.pontoReferencia ?? 
+              raw.referencia ?? 
+              raw.ponto ?? 
               null,
 
             observacoes: raw.observacoes ?? null,
@@ -409,23 +409,23 @@ const TerceirizadaVisao: React.FC = () => {
 
             // Mesmo padrão de compatibilidade
             bairro:
-              raw.bairro ??
-              raw.bairroLocal ??
-              raw.bairro_os ??
+              raw.bairro ?? 
+              raw.bairroLocal ?? 
+              raw.bairro_os ?? 
               null,
             rua:
-              raw.rua ??
-              raw.logradouro ??
-              raw.ruaAvenida ??
+              raw.rua ?? 
+              raw.logradouro ?? 
+              raw.ruaAvenida ?? 
               null,
             numero:
-              raw.numero ??
-              raw.numeroCasa ??
+              raw.numero ?? 
+              raw.numeroCasa ?? 
               null,
             pontoReferencia:
-              raw.pontoReferencia ??
-              raw.referencia ??
-              raw.ponto ??
+              raw.pontoReferencia ?? 
+              raw.referencia ?? 
+              raw.ponto ?? 
               null,
 
             observacoes: raw.observacoes ?? null,
@@ -833,9 +833,7 @@ const TerceirizadaVisao: React.FC = () => {
         <div className="os-status-tabs" style={{ marginBottom: "0.5rem" }}>
           <button
             type="button"
-            className={`os-status-tab ${
-              statusTab === "OPEN" ? "is-active" : ""
-            }`}
+            className={`os-status-tab ${statusTab === "OPEN" ? "is-active" : ""}`}
             onClick={() => {
               setStatusTab("OPEN");
               setCategoryFilter("ALL");
@@ -845,9 +843,7 @@ const TerceirizadaVisao: React.FC = () => {
           </button>
           <button
             type="button"
-            className={`os-status-tab ${
-              statusTab === "DONE" ? "is-active" : ""
-            }`}
+            className={`os-status-tab ${statusTab === "DONE" ? "is-active" : ""}`}
             onClick={() => {
               setStatusTab("DONE");
               setCategoryFilter("ALL");
@@ -857,9 +853,7 @@ const TerceirizadaVisao: React.FC = () => {
           </button>
           <button
             type="button"
-            className={`os-status-tab ${
-              statusTab === "ALL" ? "is-active" : ""
-            }`}
+            className={`os-status-tab ${statusTab === "ALL" ? "is-active" : ""}`}
             onClick={() => {
               setStatusTab("ALL");
               setCategoryFilter("ALL");
@@ -883,9 +877,7 @@ const TerceirizadaVisao: React.FC = () => {
             <div className="os-category-tabs">
               <button
                 type="button"
-                className={`os-category-tab ${
-                  categoryFilter === "ALL" ? "is-active" : ""
-                }`}
+                className={`os-category-tab ${categoryFilter === "ALL" ? "is-active" : ""}`}
                 onClick={() => setCategoryFilter("ALL")}
               >
                 Todas ({porStatus.length})
@@ -907,9 +899,7 @@ const TerceirizadaVisao: React.FC = () => {
                   <button
                     key={tipo}
                     type="button"
-                    className={`os-category-tab ${
-                      categoryFilter === tipo ? "is-active" : ""
-                    }`}
+                    className={`os-category-tab ${categoryFilter === tipo ? "is-active" : ""}`}
                     onClick={() => setCategoryFilter(tipo)}
                   >
                     {label} ({count})
