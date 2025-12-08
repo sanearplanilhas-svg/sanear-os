@@ -552,28 +552,10 @@ const ListaOrdensServico: React.FC = () => {
     setPdfModalLoading(false);
   }
 
-  // imprimir APENAS o PDF gerado, sem nova aba
+  // Imprimir usando o mesmo comportamento do Dashboard:
+  // dispara a caixa de impressão do navegador para a tela atual
   function handlePrintCurrentPdf() {
-    if (!pdfModalUrl) return;
-
-    const iframe = document.createElement("iframe");
-    iframe.style.position = "fixed";
-    iframe.style.right = "0";
-    iframe.style.bottom = "0";
-    iframe.style.width = "0";
-    iframe.style.height = "0";
-    iframe.style.border = "0";
-    iframe.src = pdfModalUrl;
-
-    document.body.appendChild(iframe);
-
-    iframe.onload = () => {
-      iframe.contentWindow?.focus();
-      iframe.contentWindow?.print();
-      setTimeout(() => {
-        document.body.removeChild(iframe);
-      }, 1000);
-    };
+    window.print();
   }
 
   async function handleDeleteOs(os: FirestoreOS) {

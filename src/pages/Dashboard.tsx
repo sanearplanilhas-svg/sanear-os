@@ -113,22 +113,30 @@ function buildMetrics(
     totalHoje++;
 
     const s = normalizeStatus(os.status);
-    if (s === "ABERTA" || s === "ABERTO") {
-      abertasCount++;
-    } else if (s === "CONCLUIDA" || s === "CONCLUIDO") {
+
+    const isConcluida =
+      s === "CONCLUIDA" || s === "CONCLUIDO" || s === "CONCLUÍDA";
+    const isCancelada = s === "CANCELADA" || s === "CANCELADO";
+
+    // concluídas / canceladas
+    if (isConcluida) {
       concluidasTotal++;
-    } else if (s === "CANCELADA" || s === "CANCELADO") {
+    } else if (isCancelada) {
       canceladasCount++;
+    } else {
+      // Tudo que não está concluído nem cancelado é tratado como aberto
+      // (ABERTA, ABERTO, ANDAMENTO, vazio, etc.)
+      abertasCount++;
     }
 
     const labelTipo = tipoLabel(os);
     porTipoMap.set(labelTipo, (porTipoMap.get(labelTipo) ?? 0) + 1);
 
-    if (s === "CONCLUIDA" || s === "CONCLUIDO") {
+    // produtividade só para concluídas
+    if (isConcluida) {
       const refTs = os.dataExecucao ?? os.createdAt;
       const key = tsToDateKey(refTs);
 
-      // aqui, para conclusões "hoje" e "últimos 7 dias", usamos a referência (data final)
       if (key === todayKey) concluidasHoje++;
       if (key && key >= sevenDaysAgoKey && key <= todayKey) concluidas7dias++;
       if (key) {
@@ -292,7 +300,7 @@ const Dashboard: React.FC = () => {
       }
     );
 
-    return () => {
+  return () => {
       unsubBuraco();
       unsubAsfalto();
     };
@@ -312,7 +320,8 @@ const Dashboard: React.FC = () => {
     [ordensBuraco, referenceDate, startDateObj, endDateObj]
   );
   const metricsAsfalto = useMemo(
-    () => buildMetrics(ordensAsfalto, referenceDate, startDateObj, endDateObj),
+    () =>
+      buildMetrics(ordensAsfalto, referenceDate, startDateObj, endDateObj),
     [ordensAsfalto, referenceDate, startDateObj, endDateObj]
   );
 
@@ -389,6 +398,22 @@ const Dashboard: React.FC = () => {
     card4Label = "Total Asfalto";
     card4Value = ordensAsfalto.length;
     card4Sub = "Total de ordens de Asfalto cadastradas no sistema.";
+  }
+
+  // Card 2 dinâmico (Asfalto ou Calçamento em aberto)
+  let card2Label = "";
+  let card2Value = 0;
+  let card2Sub = "";
+
+  if (activeTab === "buraco") {
+    card2Label = "Calçamento em aberto";
+    card2Value = metricsBuraco.abertasCount;
+    card2Sub = "Ordens de Calçamento que estão em aberto no sistema.";
+  } else {
+    // geral ou aba Asfalto
+    card2Label = "Asfalto em aberto";
+    card2Value = metricsAsfalto.abertasCount;
+    card2Sub = "Ordens de Asfalto que estão em aberto no sistema.";
   }
 
   const resumoStatus = currentMetrics.resumoStatus;
@@ -569,18 +594,14 @@ const Dashboard: React.FC = () => {
           </div>
         </div>
 
-        {/* Card 2: Asfalto em aberto */}
+        {/* Card 2 dinâmico: Asfalto ou Calçamento em aberto */}
         <div className="dashboard-kpi-card kpi-execucao">
           <div className="dashboard-kpi-header">
             <span className="dashboard-kpi-icon">🛣️</span>
-            <span className="dashboard-kpi-label">Asfalto em aberto</span>
+            <span className="dashboard-kpi-label">{card2Label}</span>
           </div>
-          <div className="dashboard-kpi-value">
-            {metricsAsfalto.abertasCount}
-          </div>
-          <div className="dashboard-kpi-sub">
-            Ordens de Asfalto que estão em aberto no sistema.
-          </div>
+          <div className="dashboard-kpi-value">{card2Value}</div>
+          <div className="dashboard-kpi-sub">{card2Sub}</div>
         </div>
 
         <div className="dashboard-kpi-card kpi-concluidas">

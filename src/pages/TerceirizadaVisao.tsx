@@ -340,23 +340,23 @@ const TerceirizadaVisao: React.FC = () => {
             // Compatibilidade: tenta primeiro os campos novos (bairro, rua, pontoReferencia),
             // se não tiver, usa alternativas que possam existir em documentos antigos.
             bairro:
-              raw.bairro ?? 
-              raw.bairroLocal ?? 
-              raw.bairro_os ?? 
+              raw.bairro ??
+              raw.bairroLocal ??
+              raw.bairro_os ??
               null,
             rua:
-              raw.rua ?? 
-              raw.logradouro ?? 
-              raw.ruaAvenida ?? 
+              raw.rua ??
+              raw.logradouro ??
+              raw.ruaAvenida ??
               null,
             numero:
-              raw.numero ?? 
-              raw.numeroCasa ?? 
+              raw.numero ??
+              raw.numeroCasa ??
               null,
             pontoReferencia:
-              raw.pontoReferencia ?? 
-              raw.referencia ?? 
-              raw.ponto ?? 
+              raw.pontoReferencia ??
+              raw.referencia ??
+              raw.ponto ??
               null,
 
             observacoes: raw.observacoes ?? null,
@@ -409,23 +409,23 @@ const TerceirizadaVisao: React.FC = () => {
 
             // Mesmo padrão de compatibilidade
             bairro:
-              raw.bairro ?? 
-              raw.bairroLocal ?? 
-              raw.bairro_os ?? 
+              raw.bairro ??
+              raw.bairroLocal ??
+              raw.bairro_os ??
               null,
             rua:
-              raw.rua ?? 
-              raw.logradouro ?? 
-              raw.ruaAvenida ?? 
+              raw.rua ??
+              raw.logradouro ??
+              raw.ruaAvenida ??
               null,
             numero:
-              raw.numero ?? 
-              raw.numeroCasa ?? 
+              raw.numero ??
+              raw.numeroCasa ??
               null,
             pontoReferencia:
-              raw.pontoReferencia ?? 
-              raw.referencia ?? 
-              raw.ponto ?? 
+              raw.pontoReferencia ??
+              raw.referencia ??
+              raw.ponto ??
               null,
 
             observacoes: raw.observacoes ?? null,
@@ -726,7 +726,8 @@ const TerceirizadaVisao: React.FC = () => {
     }
   }
 
-  // IMPRIMIR: gera PDF com os dados da OS (tabela) e envia para impressão
+  // IMPRIMIR: gera PDF com os dados da OS (tabela) e envia para impressão,
+  // igual ao comportamento do "Ver dados" na ListaOrdensServico
   async function handlePrintModal() {
     if (!modalOs) return;
 
