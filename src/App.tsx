@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import type { User } from "firebase/auth";
 import {
@@ -7,8 +7,18 @@ import {
   signOut,
 } from "firebase/auth";
 
+import {
+  collection,
+  onSnapshot,
+  orderBy,
+  query,
+  where,
+  Timestamp,
+  limit,
+} from "firebase/firestore";
+
 import "./App.css";
-import { auth } from "./lib/firebaseClient";
+import { auth, db } from "./lib/firebaseClient";
 
 import BuracoNaRua from "./pages/BuracoNaRua";
 import Asfalto from "./pages/Asfalto";
@@ -33,6 +43,63 @@ type MenuKey =
 
 type SimulatedRole = "diretor" | "operador" | "terceirizada" | "adm";
 
+type NotifKind = "created" | "concluded";
+
+type NotifItem = {
+  id: string; // único
+  kind: NotifKind;
+  osId: string;
+  collectionName: "ordens_servico" | "ordensServico";
+  origemLabel: "Calçamento" | "Asfalto";
+  numero: string;
+  tsMillis: number;
+  message: string;
+};
+
+function normalizeText(value?: string | null): string {
+  return (value ?? "")
+    .toString()
+    .trim()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase();
+}
+
+function inferOrigemLabel(
+  tipo: any,
+  fallback: "Calçamento" | "Asfalto"
+): "Calçamento" | "Asfalto" {
+  const t = normalizeText(typeof tipo === "string" ? tipo : "");
+  if (t.includes("BURACO") || t.includes("CALCAMENTO") || t === "BURACO_RUA") {
+    return "Calçamento";
+  }
+  if (t.includes("ASFALTO") || t === "ASFALTO") {
+    return "Asfalto";
+  }
+  return fallback;
+}
+
+function formatNotifTime(ms: number) {
+  const d = new Date(ms);
+  return d.toLocaleString("pt-BR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function getNumeroOs(data: any, fallbackId: string) {
+  return (
+    data?.ordemServico ??
+    data?.protocolo ??
+    data?.numeroOS ??
+    data?.os ??
+    fallbackId
+  );
+}
+
 const App: React.FC = () => {
   // ---- AUTH ----
   const [user, setUser] = useState<User | null>(null);
@@ -56,15 +123,38 @@ const App: React.FC = () => {
         "sanear-active-menu"
       ) as MenuKey | null;
 
-      if (stored) {
-        return stored;
-      }
+      if (stored) return stored;
     }
     return "dashboard";
   });
 
   // Papel simulado (para exibir no topo)
   const [simulatedRole, setSimulatedRole] = useState<SimulatedRole>("operador");
+
+  // ==== NOTIFICAÇÕES (feed) ====
+  const [notifOpen, setNotifOpen] = useState(false);
+
+  const [createdBuraco, setCreatedBuraco] = useState<NotifItem[]>([]);
+  const [createdAsfalto, setCreatedAsfalto] = useState<NotifItem[]>([]);
+  const [concludedBuraco, setConcludedBuraco] = useState<NotifItem[]>([]);
+  const [concludedAsfalto, setConcludedAsfalto] = useState<NotifItem[]>([]);
+
+  const notifications = useMemo(() => {
+    const all = [
+      ...createdBuraco,
+      ...createdAsfalto,
+      ...concludedBuraco,
+      ...concludedAsfalto,
+    ];
+
+    // remove duplicados por id
+    const map = new Map<string, NotifItem>();
+    for (const n of all) map.set(n.id, n);
+
+    return Array.from(map.values()).sort((a, b) => b.tsMillis - a.tsMillis);
+  }, [createdBuraco, createdAsfalto, concludedBuraco, concludedAsfalto]);
+
+  const unreadCount = notifications.length;
 
   // Observa o estado de autenticação do Firebase
   useEffect(() => {
@@ -101,6 +191,7 @@ const App: React.FC = () => {
     const storedRole = localStorage.getItem("sanear-role") as
       | SimulatedRole
       | null;
+
     if (
       storedRole === "diretor" ||
       storedRole === "operador" ||
@@ -112,6 +203,179 @@ const App: React.FC = () => {
       setSimulatedRole("operador");
     }
   }, []);
+
+  // Fecha o popover ao clicar fora
+  useEffect(() => {
+    if (!notifOpen) return;
+    const handler = () => setNotifOpen(false);
+    window.addEventListener("click", handler);
+    return () => window.removeEventListener("click", handler);
+  }, [notifOpen]);
+
+  // Listener de novas OS (criadas) e OS concluídas (dataExecucao)
+  useEffect(() => {
+    if (!user) return;
+
+    const seenKey = `sanear-lastSeenOS-${user.uid}`;
+    const raw = localStorage.getItem(seenKey);
+    const lastSeenMs = raw ? Number(raw) : 0;
+
+    // Primeira vez no navegador: não mostra histórico como "novo"
+    if (!lastSeenMs || Number.isNaN(lastSeenMs)) {
+      localStorage.setItem(seenKey, String(Date.now()));
+      setCreatedBuraco([]);
+      setCreatedAsfalto([]);
+      setConcludedBuraco([]);
+      setConcludedAsfalto([]);
+      return;
+    }
+
+    const lastSeenTs = Timestamp.fromMillis(lastSeenMs);
+
+    const buildCreatedNotifs = (
+      colName: "ordens_servico" | "ordensServico",
+      fallbackOrigem: "Calçamento" | "Asfalto",
+      snap: any
+    ) => {
+      const items: NotifItem[] = snap.docs.map((d: any) => {
+        const data = d.data() as any;
+        const ts = (data.createdAt as Timestamp | null) ?? null;
+        const tsMillis = ts ? ts.toMillis() : Date.now();
+
+        const origemLabel = inferOrigemLabel(data.tipo, fallbackOrigem);
+        const numero = String(getNumeroOs(data, d.id));
+
+        return {
+          id: `created-${colName}-${d.id}-${tsMillis}`,
+          kind: "created",
+          osId: d.id,
+          collectionName: colName,
+          origemLabel,
+          numero,
+          tsMillis,
+          message: `Uma nova OS de ${origemLabel} foi criada (OS ${numero}).`,
+        };
+      });
+      return items;
+    };
+
+    const buildConcludedNotifs = (
+      colName: "ordens_servico" | "ordensServico",
+      fallbackOrigem: "Calçamento" | "Asfalto",
+      snap: any
+    ) => {
+      const items: NotifItem[] = snap.docs.map((d: any) => {
+        const data = d.data() as any;
+        const ts =
+          (data.dataExecucao as Timestamp | null) ??
+          (data.updatedAt as Timestamp | null) ??
+          null;
+
+        const tsMillis = ts ? ts.toMillis() : Date.now();
+
+        const origemLabel = inferOrigemLabel(data.tipo, fallbackOrigem);
+        const numero = String(getNumeroOs(data, d.id));
+
+        return {
+          id: `concluded-${colName}-${d.id}-${tsMillis}`,
+          kind: "concluded",
+          osId: d.id,
+          collectionName: colName,
+          origemLabel,
+          numero,
+          tsMillis,
+          message: `A OS ${numero} foi marcada como concluída (${origemLabel}).`,
+        };
+      });
+      return items;
+    };
+
+    // CRIADAS
+    const qCreatedBuraco = query(
+      collection(db, "ordens_servico"),
+      where("createdAt", ">", lastSeenTs),
+      orderBy("createdAt", "desc"),
+      limit(20)
+    );
+
+    const qCreatedAsfalto = query(
+      collection(db, "ordensServico"),
+      where("createdAt", ">", lastSeenTs),
+      orderBy("createdAt", "desc"),
+      limit(20)
+    );
+
+    // CONCLUÍDAS (usa dataExecucao como “evento de conclusão”)
+    const qConcludedBuraco = query(
+      collection(db, "ordens_servico"),
+      where("dataExecucao", ">", lastSeenTs),
+      orderBy("dataExecucao", "desc"),
+      limit(20)
+    );
+
+    const qConcludedAsfalto = query(
+      collection(db, "ordensServico"),
+      where("dataExecucao", ">", lastSeenTs),
+      orderBy("dataExecucao", "desc"),
+      limit(20)
+    );
+
+    const u1 = onSnapshot(
+      qCreatedBuraco,
+      (snap) => setCreatedBuraco(buildCreatedNotifs("ordens_servico", "Calçamento", snap)),
+      (err) => console.error("Notif created ordens_servico:", err)
+    );
+
+    const u2 = onSnapshot(
+      qCreatedAsfalto,
+      (snap) => setCreatedAsfalto(buildCreatedNotifs("ordensServico", "Asfalto", snap)),
+      (err) => console.error("Notif created ordensServico:", err)
+    );
+
+    const u3 = onSnapshot(
+      qConcludedBuraco,
+      (snap) => setConcludedBuraco(buildConcludedNotifs("ordens_servico", "Calçamento", snap)),
+      (err) => console.error("Notif concluded ordens_servico:", err)
+    );
+
+    const u4 = onSnapshot(
+      qConcludedAsfalto,
+      (snap) => setConcludedAsfalto(buildConcludedNotifs("ordensServico", "Asfalto", snap)),
+      (err) => console.error("Notif concluded ordensServico:", err)
+    );
+
+    return () => {
+      u1();
+      u2();
+      u3();
+      u4();
+    };
+  }, [user]);
+
+  function markAllAsSeen() {
+    if (!user) return;
+    const key = `sanear-lastSeenOS-${user.uid}`;
+    localStorage.setItem(key, String(Date.now()));
+
+    setCreatedBuraco([]);
+    setCreatedAsfalto([]);
+    setConcludedBuraco([]);
+    setConcludedAsfalto([]);
+    setNotifOpen(false);
+  }
+
+  function openNotification(n: NotifItem) {
+    // marca como visto (prático e simples)
+    markAllAsSeen();
+
+    // manda abrir na Lista + detalhes da OS
+    window.sessionStorage.setItem(
+      "sanear-open-os",
+      JSON.stringify({ id: n.osId, col: n.collectionName })
+    );
+
+    setActiveMenu("listaOS");
+  }
 
   async function handleLogin(e: FormEvent) {
     e.preventDefault();
@@ -127,21 +391,14 @@ const App: React.FC = () => {
       setUser(cred.user);
       setActiveMenu("dashboard");
 
-      if (rememberMe) {
-        localStorage.setItem("sanear-email", email);
-      } else {
-        localStorage.removeItem("sanear-email");
-      }
+      if (rememberMe) localStorage.setItem("sanear-email", email);
+      else localStorage.removeItem("sanear-email");
     } catch (error: any) {
       console.error(error);
       let msg = "Não foi possível fazer login. Verifique os dados.";
-      if (error?.code === "auth/invalid-credential") {
-        msg = "E-mail ou senha inválidos.";
-      } else if (error?.code === "auth/user-not-found") {
-        msg = "Usuário não encontrado.";
-      } else if (error?.code === "auth/wrong-password") {
-        msg = "Senha incorreta.";
-      }
+      if (error?.code === "auth/invalid-credential") msg = "E-mail ou senha inválidos.";
+      else if (error?.code === "auth/user-not-found") msg = "Usuário não encontrado.";
+      else if (error?.code === "auth/wrong-password") msg = "Senha incorreta.";
       setLoginError(msg);
     }
   }
@@ -152,6 +409,12 @@ const App: React.FC = () => {
       setUser(null);
       setActiveMenu("dashboard");
 
+      setNotifOpen(false);
+      setCreatedBuraco([]);
+      setCreatedAsfalto([]);
+      setConcludedBuraco([]);
+      setConcludedAsfalto([]);
+
       if (typeof window !== "undefined") {
         window.sessionStorage.removeItem("sanear-active-menu");
       }
@@ -160,43 +423,30 @@ const App: React.FC = () => {
     }
   }
 
-  // ---- CONTEÚDO PRINCIPAL (PÁGINAS) ----
   function renderContent() {
     switch (activeMenu) {
       case "dashboard":
         return <Dashboard />;
-
       case "buraco":
-        // IMPORTANTE: passa onBack para satisfazer o tipo BuracoNaRuaProps
         return <BuracoNaRua onBack={() => setActiveMenu("dashboard")} />;
-
       case "asfalto":
         return <Asfalto onBack={() => setActiveMenu("dashboard")} />;
-
       case "hidrojato":
         return <CaminhaoHidrojato />;
-
       case "esgoto_entupido":
         return <EsgotoEntupido />;
-
       case "esgoto_retornando":
         return <EsgotoRetornando />;
-
       case "terceirizada":
         return <TerceirizadaVisao />;
-
       case "usuario":
         return <Usuario />;
-
       case "listaOS":
         return <ListaOrdensServico />;
-
       default:
         return <Dashboard />;
     }
   }
-
-  // ================= ESTADOS: CARREGANDO / NÃO LOGADO =================
 
   if (authLoading) {
     return (
@@ -219,7 +469,6 @@ const App: React.FC = () => {
   }
 
   if (!user) {
-    // ================= TELA DE LOGIN =================
     return (
       <>
         <div className="login-page">
@@ -323,12 +572,8 @@ const App: React.FC = () => {
           </div>
         </div>
 
-        {/* Modal: Esqueceu a senha */}
         {showForgotModal && (
-          <div
-            className="modal-backdrop"
-            onClick={() => setShowForgotModal(false)}
-          >
+          <div className="modal-backdrop" onClick={() => setShowForgotModal(false)}>
             <div className="modal" onClick={(e) => e.stopPropagation()}>
               <div className="modal-header">
                 <h3 className="modal-title">Esqueceu a senha</h3>
@@ -359,12 +604,8 @@ const App: React.FC = () => {
           </div>
         )}
 
-        {/* Modal: Criar acesso */}
         {showCreateModal && (
-          <div
-            className="modal-backdrop"
-            onClick={() => setShowCreateModal(false)}
-          >
+          <div className="modal-backdrop" onClick={() => setShowCreateModal(false)}>
             <div className="modal" onClick={(e) => e.stopPropagation()}>
               <div className="modal-header">
                 <h3 className="modal-title">Solicitar acesso</h3>
@@ -398,11 +639,8 @@ const App: React.FC = () => {
     );
   }
 
-  // ================= APP LOGADO =================
-
   return (
     <div className="app-shell">
-      {/* SIDEBAR */}
       <aside className="sidebar">
         <div className="sidebar-brand">
           <div className="sidebar-logo-circle">S</div>
@@ -417,9 +655,7 @@ const App: React.FC = () => {
           <div className="sidebar-nav">
             <button
               type="button"
-              className={`sidebar-link ${
-                activeMenu === "dashboard" ? "active" : ""
-              }`}
+              className={`sidebar-link ${activeMenu === "dashboard" ? "active" : ""}`}
               onClick={() => setActiveMenu("dashboard")}
             >
               <span>Dashboard</span>
@@ -433,9 +669,7 @@ const App: React.FC = () => {
           <div className="sidebar-nav">
             <button
               type="button"
-              className={`sidebar-link ${
-                activeMenu === "buraco" ? "active" : ""
-              }`}
+              className={`sidebar-link ${activeMenu === "buraco" ? "active" : ""}`}
               onClick={() => setActiveMenu("buraco")}
             >
               <span>Calçamento</span>
@@ -443,9 +677,7 @@ const App: React.FC = () => {
 
             <button
               type="button"
-              className={`sidebar-link ${
-                activeMenu === "asfalto" ? "active" : ""
-              }`}
+              className={`sidebar-link ${activeMenu === "asfalto" ? "active" : ""}`}
               onClick={() => setActiveMenu("asfalto")}
             >
               <span>Asfalto</span>
@@ -453,9 +685,7 @@ const App: React.FC = () => {
 
             <button
               type="button"
-              className={`sidebar-link ${
-                activeMenu === "hidrojato" ? "active" : ""
-              }`}
+              className={`sidebar-link ${activeMenu === "hidrojato" ? "active" : ""}`}
               onClick={() => setActiveMenu("hidrojato")}
             >
               <span>Caminhão Hidrojato</span>
@@ -463,9 +693,7 @@ const App: React.FC = () => {
 
             <button
               type="button"
-              className={`sidebar-link ${
-                activeMenu === "esgoto_entupido" ? "active" : ""
-              }`}
+              className={`sidebar-link ${activeMenu === "esgoto_entupido" ? "active" : ""}`}
               onClick={() => setActiveMenu("esgoto_entupido")}
             >
               <span>Esgoto Entupido</span>
@@ -473,9 +701,7 @@ const App: React.FC = () => {
 
             <button
               type="button"
-              className={`sidebar-link ${
-                activeMenu === "esgoto_retornando" ? "active" : ""
-              }`}
+              className={`sidebar-link ${activeMenu === "esgoto_retornando" ? "active" : ""}`}
               onClick={() => setActiveMenu("esgoto_retornando")}
             >
               <span>Esgoto Retornando</span>
@@ -483,9 +709,7 @@ const App: React.FC = () => {
 
             <button
               type="button"
-              className={`sidebar-link ${
-                activeMenu === "listaOS" ? "active" : ""
-              }`}
+              className={`sidebar-link ${activeMenu === "listaOS" ? "active" : ""}`}
               onClick={() => setActiveMenu("listaOS")}
             >
               <span>Lista de Ordens de Serviço</span>
@@ -498,9 +722,7 @@ const App: React.FC = () => {
           <div className="sidebar-nav">
             <button
               type="button"
-              className={`sidebar-link ${
-                activeMenu === "terceirizada" ? "active" : ""
-              }`}
+              className={`sidebar-link ${activeMenu === "terceirizada" ? "active" : ""}`}
               onClick={() => setActiveMenu("terceirizada")}
             >
               <span>Visão da Terceirizada</span>
@@ -514,9 +736,7 @@ const App: React.FC = () => {
           <div className="sidebar-nav">
             <button
               type="button"
-              className={`sidebar-link ${
-                activeMenu === "usuario" ? "active" : ""
-              }`}
+              className={`sidebar-link ${activeMenu === "usuario" ? "active" : ""}`}
               onClick={() => setActiveMenu("usuario")}
             >
               <span>Usuário</span>
@@ -526,7 +746,6 @@ const App: React.FC = () => {
         </div>
       </aside>
 
-      {/* MAIN */}
       <main className="app-main">
         <header className="topbar">
           <div className="topbar-title">
@@ -556,21 +775,68 @@ const App: React.FC = () => {
 
           <div className="topbar-user">
             <div>
-              <div className="topbar-user-name">
-                {user?.displayName || "Usuário"}
-              </div>
+              <div className="topbar-user-name">{user?.displayName || "Usuário"}</div>
               <div style={{ fontSize: "0.75rem", color: "#9ca3af" }}>
                 {user?.email}
               </div>
             </div>
-            <span className="topbar-user-role">
-              Perfil: {simulatedRole.toUpperCase()}
-            </span>
-            <button
-              type="button"
-              className="btn-secondary"
-              onClick={handleLogout}
-            >
+
+            <span className="topbar-user-role">Perfil: {simulatedRole.toUpperCase()}</span>
+
+            {/* NOTIFICAÇÕES */}
+            <div className="notif2-wrapper" onClick={(e) => e.stopPropagation()}>
+              <button
+                type="button"
+                className="notif2-btn"
+                onClick={() => setNotifOpen((p) => !p)}
+                aria-label="Notificações"
+                title="Notificações"
+              >
+                🔔
+                {unreadCount > 0 && (
+                  <span className="notif2-badge">{unreadCount > 99 ? "99+" : unreadCount}</span>
+                )}
+              </button>
+
+              {notifOpen && (
+                <div className="notif2-popover">
+                  <div className="notif2-head">
+                    <div>
+                      <div className="notif2-title">Notificações</div>
+                      <div className="notif2-sub">
+                        Novas OS criadas e OS concluídas desde a última visualização.
+                      </div>
+                    </div>
+
+                    <button type="button" className="notif2-clear" onClick={markAllAsSeen}>
+                      Marcar tudo como visto
+                    </button>
+                  </div>
+
+                  {notifications.length === 0 ? (
+                    <div className="notif2-empty">Nenhuma notificação nova.</div>
+                  ) : (
+                    <div className="notif2-list">
+                      {notifications.map((n) => (
+                        <button
+                          key={n.id}
+                          type="button"
+                          className="notif2-item"
+                          onClick={() => openNotification(n)}
+                        >
+                          <div className="notif2-item-title">{n.message}</div>
+                          <div className="notif2-item-meta">
+                            {formatNotifTime(n.tsMillis)}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <button type="button" className="btn-secondary" onClick={handleLogout}>
               Sair
             </button>
           </div>

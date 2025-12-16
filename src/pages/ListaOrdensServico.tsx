@@ -15,8 +15,8 @@ import {
   deleteDoc,
   updateDoc,
   serverTimestamp,
+  Timestamp,
 } from "firebase/firestore";
-import type { Timestamp } from "firebase/firestore";
 import { db, auth } from "../lib/firebaseClient";
 import { supabase } from "../lib/supabaseClient";
 
@@ -84,6 +84,33 @@ function formatDateTime(value?: Timestamp | null): string {
   } catch {
     return "-";
   }
+}
+
+// Para usar no <input type="datetime-local" />
+function toDateTimeLocal(value?: Timestamp | null): string {
+  if (!value) return "";
+  const d = value.toDate();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const yyyy = d.getFullYear();
+  const mm = pad(d.getMonth() + 1);
+  const dd = pad(d.getDate());
+  const hh = pad(d.getHours());
+  const mi = pad(d.getMinutes());
+  return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
+}
+
+// Evita problemas de fuso/parse do Date() com string ISO sem timezone
+function fromDateTimeLocal(value: string): Date {
+  // value: "YYYY-MM-DDTHH:MM"
+  const [datePart, timePart] = value.split("T");
+  const [y, m, d] = datePart.split("-").map(Number);
+  const [hh, mm] = (timePart || "00:00").split(":").map(Number);
+  return new Date(y, m - 1, d, hh, mm, 0, 0);
+}
+
+function isAdmRole(role?: string | null): boolean {
+  const r = (role ?? "").toUpperCase();
+  return r === "ADMIN" || r === "ADM";
 }
 
 function normalizeFotos(fotos: any): NormalizedPhoto[] {
@@ -338,6 +365,31 @@ const ListaOrdensServico: React.FC = () => {
     };
   }, []);
 
+  // ABRIR OS VINDO DE NOTIFICAÇÃO (sessionStorage sanear-open-os)
+  useEffect(() => {
+    if (loading) return;
+
+    const raw = window.sessionStorage.getItem("sanear-open-os");
+    if (!raw) return;
+
+    try {
+      const parsed = JSON.parse(raw) as { id: string; col?: string };
+      const id = parsed?.id;
+      if (!id) return;
+
+      const all = [...ordensBuraco, ...ordensAsfalto];
+      const found = all.find((o) => o.id === id);
+
+      if (found) {
+        setDetailsModalOs(found);
+        setIsEditingDetails(false);
+        window.sessionStorage.removeItem("sanear-open-os");
+      }
+    } catch {
+      window.sessionStorage.removeItem("sanear-open-os");
+    }
+  }, [loading, ordensBuraco, ordensAsfalto]);
+
   // regra de permissão: criador OU admin OU diretor
   const canEditOs = (os: FirestoreOS): boolean => {
     const emailAtual = currentUserEmail?.toLowerCase() ?? null;
@@ -458,9 +510,7 @@ const ListaOrdensServico: React.FC = () => {
       {
         label: "Observações",
         value:
-          (os.observacoes || "")
-            .replace(/\s+/g, " ")
-            .trim() || "-",
+          (os.observacoes || "").replace(/\s+/g, " ").trim() || "-",
       },
     ];
 
@@ -473,7 +523,12 @@ const ListaOrdensServico: React.FC = () => {
 
       const labelText = `${label}: `;
       const labelWidth = boldFont.widthOfTextAtSize(labelText, fontSize);
-      const valueLines = wrapPdfText(value, font, fontSize, maxWidth - labelWidth);
+      const valueLines = wrapPdfText(
+        value,
+        font,
+        fontSize,
+        maxWidth - labelWidth
+      );
 
       const firstValueLine = valueLines[0] ?? "";
       page.drawText(labelText, {
@@ -612,6 +667,12 @@ const ListaOrdensServico: React.FC = () => {
         pontoReferencia: detailsModalOs.pontoReferencia || null,
         observacoes: detailsModalOs.observacoes || null,
         status: detailsModalOs.status || null,
+
+        // SOMENTE ADM/ADMIN pode alterar data/hora de execução
+        ...(isAdmRole(currentUserRole)
+          ? { dataExecucao: detailsModalOs.dataExecucao ?? null }
+          : {}),
+
         updatedAt: serverTimestamp(),
       });
 
@@ -680,7 +741,9 @@ const ListaOrdensServico: React.FC = () => {
     setPhotoModal(null);
   }
 
-  function getFotosFromModalState(state: PhotoModalState | null): NormalizedPhoto[] {
+  function getFotosFromModalState(
+    state: PhotoModalState | null
+  ): NormalizedPhoto[] {
     if (!state) return [];
     const { os, tipo } = state;
     return normalizeFotos(tipo === "abertura" ? os.fotos : os.fotosExecucao);
@@ -701,7 +764,8 @@ const ListaOrdensServico: React.FC = () => {
       if (!prev) return prev;
       const fotos = getFotosFromModalState(prev);
       if (fotos.length === 0) return prev;
-      const prevIndex = (prev.currentIndex - 1 + fotos.length) % fotos.length;
+      const prevIndex =
+        (prev.currentIndex - 1 + fotos.length) % fotos.length;
       return { ...prev, currentIndex: prevIndex };
     });
   }
@@ -1224,11 +1288,36 @@ const ListaOrdensServico: React.FC = () => {
 
                   <div className="page-field">
                     <label>Data de execução</label>
-                    <input
-                      className="field-readonly"
-                      readOnly
-                      value={formatDateTime(detailsModalOs.dataExecucao)}
-                    />
+
+                    {isEditingDetails &&
+                    canEditCurrent &&
+                    isAdmRole(currentUserRole) ? (
+                      <input
+                        className="field-readonly"
+                        type="datetime-local"
+                        value={toDateTimeLocal(detailsModalOs.dataExecucao)}
+                        onChange={(e) =>
+                          setDetailsModalOs((prev) =>
+                            prev
+                              ? {
+                                  ...prev,
+                                  dataExecucao: e.target.value
+                                    ? Timestamp.fromDate(
+                                        fromDateTimeLocal(e.target.value)
+                                      )
+                                    : null,
+                                }
+                              : prev
+                          )
+                        }
+                      />
+                    ) : (
+                      <input
+                        className="field-readonly"
+                        readOnly
+                        value={formatDateTime(detailsModalOs.dataExecucao)}
+                      />
+                    )}
                   </div>
                 </div>
               </div>

@@ -43,8 +43,48 @@ function normalizeStatus(status?: string | null): string {
   return (status || "").toString().trim().toUpperCase();
 }
 
+function normalizeText(value?: string | null): string {
+  return (value ?? "")
+    .toString()
+    .trim()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase();
+}
+
+/**
+ * Inferência robusta da origem:
+ * - Se o tipo indicar BURACO/CALÇAMENTO => buraco
+ * - Se indicar ASFALTO => asfalto
+ * - Se não der para saber, usa fallback (pela coleção)
+ */
+function inferOrigem(tipo?: string | null, fallback: Origem = "asfalto"): Origem {
+  const t = normalizeText(tipo);
+
+  if (!t) return fallback;
+
+  // Calçamento
+  if (
+    t === "BURACO_RUA" ||
+    t.includes("BURACO") ||
+    t.includes("CALCAMENTO") ||
+    t.includes("CALCAMENTO") ||
+    t.includes("PAVIMENTO") // opcional (se você usar algo assim)
+  ) {
+    return "buraco";
+  }
+
+  // Asfalto
+  if (t === "ASFALTO" || t.includes("ASFALTO")) {
+    return "asfalto";
+  }
+
+  return fallback;
+}
+
 function tipoLabel(os: OSItem): string {
-  const t = (os.tipo || "").toString().trim().toUpperCase();
+  const t = normalizeText(os.tipo);
+
   if (t === "BURACO_RUA" || os.origem === "buraco") return "Calçamento";
   if (t === "ASFALTO" || os.origem === "asfalto") return "Asfalto";
   return "Outros";
@@ -118,14 +158,11 @@ function buildMetrics(
       s === "CONCLUIDA" || s === "CONCLUIDO" || s === "CONCLUÍDA";
     const isCancelada = s === "CANCELADA" || s === "CANCELADO";
 
-    // concluídas / canceladas
     if (isConcluida) {
       concluidasTotal++;
     } else if (isCancelada) {
       canceladasCount++;
     } else {
-      // Tudo que não está concluído nem cancelado é tratado como aberto
-      // (ABERTA, ABERTO, ANDAMENTO, vazio, etc.)
       abertasCount++;
     }
 
@@ -146,12 +183,10 @@ function buildMetrics(
     }
   }
 
-  const porTipoData = Array.from(porTipoMap.entries()).map(
-    ([tipo, value]) => ({
-      tipo,
-      value,
-    })
-  );
+  const porTipoData = Array.from(porTipoMap.entries()).map(([tipo, value]) => ({
+    tipo,
+    value,
+  }));
 
   const produtividade7dias = diasArr.map((d) => ({
     dia: d.label,
@@ -178,9 +213,11 @@ function buildMetrics(
 }
 
 const Dashboard: React.FC = () => {
-  const [ordensBuraco, setOrdensBuraco] = useState<OSItem[]>([]);
-  const [ordensAsfalto, setOrdensAsfalto] = useState<OSItem[]>([]);
+  // RAW por coleção
+  const [ordensBuracoRaw, setOrdensBuracoRaw] = useState<OSItem[]>([]);
+  const [ordensAsfaltoRaw, setOrdensAsfaltoRaw] = useState<OSItem[]>([]);
   const [loading, setLoading] = useState(true);
+
   const [activeTab, setActiveTab] = useState<"geral" | "buraco" | "asfalto">(
     "geral"
   );
@@ -257,14 +294,15 @@ const Dashboard: React.FC = () => {
           const data = docSnap.data() as any;
           return {
             id: docSnap.id,
-            origem: "buraco",
+            // fallback buraco (porque veio da coleção de calçamento)
+            origem: inferOrigem(data.tipo ?? null, "buraco"),
             tipo: data.tipo ?? null,
             status: data.status ?? null,
             createdAt: (data.createdAt as Timestamp | null) ?? null,
             dataExecucao: (data.dataExecucao as Timestamp | null) ?? null,
           };
         });
-        setOrdensBuraco(lista);
+        setOrdensBuracoRaw(lista);
         setLoading(false);
       },
       (err) => {
@@ -284,14 +322,15 @@ const Dashboard: React.FC = () => {
           const data = docSnap.data() as any;
           return {
             id: docSnap.id,
-            origem: "asfalto",
+            // fallback asfalto (porque veio da coleção de asfalto)
+            origem: inferOrigem(data.tipo ?? null, "asfalto"),
             tipo: data.tipo ?? null,
             status: data.status ?? null,
             createdAt: (data.createdAt as Timestamp | null) ?? null,
             dataExecucao: (data.dataExecucao as Timestamp | null) ?? null,
           };
         });
-        setOrdensAsfalto(lista);
+        setOrdensAsfaltoRaw(lista);
         setLoading(false);
       },
       (err) => {
@@ -300,11 +339,27 @@ const Dashboard: React.FC = () => {
       }
     );
 
-  return () => {
+    return () => {
       unsubBuraco();
       unsubAsfalto();
     };
   }, []);
+
+  // Junta tudo e separa pela origem inferida (corrige o problema do card)
+  const ordensAll = useMemo(
+    () => [...ordensBuracoRaw, ...ordensAsfaltoRaw],
+    [ordensBuracoRaw, ordensAsfaltoRaw]
+  );
+
+  const ordensBuraco = useMemo(
+    () => ordensAll.filter((o) => o.origem === "buraco"),
+    [ordensAll]
+  );
+
+  const ordensAsfalto = useMemo(
+    () => ordensAll.filter((o) => o.origem === "asfalto"),
+    [ordensAll]
+  );
 
   const ordens = useMemo(
     () => [...ordensBuraco, ...ordensAsfalto],
@@ -315,13 +370,14 @@ const Dashboard: React.FC = () => {
     () => buildMetrics(ordens, referenceDate, startDateObj, endDateObj),
     [ordens, referenceDate, startDateObj, endDateObj]
   );
+
   const metricsBuraco = useMemo(
     () => buildMetrics(ordensBuraco, referenceDate, startDateObj, endDateObj),
     [ordensBuraco, referenceDate, startDateObj, endDateObj]
   );
+
   const metricsAsfalto = useMemo(
-    () =>
-      buildMetrics(ordensAsfalto, referenceDate, startDateObj, endDateObj),
+    () => buildMetrics(ordensAsfalto, referenceDate, startDateObj, endDateObj),
     [ordensAsfalto, referenceDate, startDateObj, endDateObj]
   );
 
@@ -329,12 +385,8 @@ const Dashboard: React.FC = () => {
     const totalBuraco = ordensBuraco.length;
     const totalAsfalto = ordensAsfalto.length;
     const data: { name: string; value: number }[] = [];
-    if (totalBuraco > 0) {
-      data.push({ name: "Calçamento", value: totalBuraco });
-    }
-    if (totalAsfalto > 0) {
-      data.push({ name: "Asfalto", value: totalAsfalto });
-    }
+    if (totalBuraco > 0) data.push({ name: "Calçamento", value: totalBuraco });
+    if (totalAsfalto > 0) data.push({ name: "Asfalto", value: totalAsfalto });
     return data;
   }, [ordensBuraco.length, ordensAsfalto.length]);
 
@@ -365,15 +417,13 @@ const Dashboard: React.FC = () => {
     headerDesc =
       "Indicadores focados apenas nas ordens de Calçamento registradas no sistema.";
     headerLabel = "OS no período (Calçamento)";
-    headerSubBase =
-      "Ordens de Calçamento dentro do período configurado no filtro.";
+    headerSubBase = "Ordens de Calçamento dentro do período configurado no filtro.";
   } else {
     headerTitle = "Asfalto";
     headerDesc =
       "Indicadores focados apenas nas ordens de Asfalto registradas no sistema.";
     headerLabel = "OS no período (Asfalto)";
-    headerSubBase =
-      "Ordens de Asfalto dentro do período configurado no filtro.";
+    headerSubBase = "Ordens de Asfalto dentro do período configurado no filtro.";
   }
 
   const headerSub = filterRangeLabel
@@ -388,8 +438,7 @@ const Dashboard: React.FC = () => {
   if (activeTab === "geral") {
     card4Label = "Calçamento em aberto";
     card4Value = metricsBuraco.abertasCount;
-    card4Sub =
-      "Quantidade de ordens de Calçamento que ainda não foram concluídas.";
+    card4Sub = "Quantidade de ordens de Calçamento que ainda não foram concluídas.";
   } else if (activeTab === "buraco") {
     card4Label = "Total Calçamento";
     card4Value = ordensBuraco.length;
@@ -410,7 +459,6 @@ const Dashboard: React.FC = () => {
     card2Value = metricsBuraco.abertasCount;
     card2Sub = "Ordens de Calçamento que estão em aberto no sistema.";
   } else {
-    // geral ou aba Asfalto
     card2Label = "Asfalto em aberto";
     card2Value = metricsAsfalto.abertasCount;
     card2Sub = "Ordens de Asfalto que estão em aberto no sistema.";
@@ -481,10 +529,7 @@ const Dashboard: React.FC = () => {
           className="dashboard-modal-backdrop"
           onClick={() => setIsFilterOpen(false)}
         >
-          <div
-            className="dashboard-modal"
-            onClick={(e) => e.stopPropagation()}
-          >
+          <div className="dashboard-modal" onClick={(e) => e.stopPropagation()}>
             <div className="dashboard-modal-header">
               <div>
                 <div className="dashboard-modal-title">
@@ -512,9 +557,7 @@ const Dashboard: React.FC = () => {
                   type="date"
                   value={filterStartDate ?? ""}
                   onChange={(e) =>
-                    setFilterStartDate(
-                      e.target.value ? e.target.value : null
-                    )
+                    setFilterStartDate(e.target.value ? e.target.value : null)
                   }
                 />
               </div>
@@ -586,9 +629,7 @@ const Dashboard: React.FC = () => {
             <span className="dashboard-kpi-icon">📂</span>
             <span className="dashboard-kpi-label">OS abertas</span>
           </div>
-          <div className="dashboard-kpi-value">
-            {currentMetrics.abertasCount}
-          </div>
+          <div className="dashboard-kpi-value">{currentMetrics.abertasCount}</div>
           <div className="dashboard-kpi-sub">
             Ordens que foram criadas e ainda não concluídas.
           </div>
@@ -607,16 +648,11 @@ const Dashboard: React.FC = () => {
         <div className="dashboard-kpi-card kpi-concluidas">
           <div className="dashboard-kpi-header">
             <span className="dashboard-kpi-icon">📈</span>
-            <span className="dashboard-kpi-label">
-              Concluídas últimos 7 dias
-            </span>
+            <span className="dashboard-kpi-label">Concluídas últimos 7 dias</span>
           </div>
-          <div className="dashboard-kpi-value">
-            {currentMetrics.concluidas7dias}
-          </div>
+          <div className="dashboard-kpi-value">{currentMetrics.concluidas7dias}</div>
           <div className="dashboard-kpi-sub">
-            Visão de produtividade recente considerando o período e a data
-            final.
+            Visão de produtividade recente considerando o período e a data final.
           </div>
         </div>
 
@@ -679,8 +715,7 @@ const Dashboard: React.FC = () => {
               <div>
                 <h3>OS por tipo de atendimento</h3>
                 <p className="dashboard-chart-sub">
-                  Classificação das ordens pelo tipo mais relevante para o
-                  setor operacional.
+                  Classificação das ordens pelo tipo mais relevante para o setor operacional.
                 </p>
               </div>
             </div>
@@ -692,16 +727,8 @@ const Dashboard: React.FC = () => {
                   margin={{ top: 10, right: 16, left: 80, bottom: 0 }}
                 >
                   <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                  <XAxis
-                    type="number"
-                    tick={{ fontSize: 11 }}
-                    allowDecimals={false}
-                  />
-                  <YAxis
-                    type="category"
-                    dataKey="tipo"
-                    tick={{ fontSize: 11 }}
-                  />
+                  <XAxis type="number" tick={{ fontSize: 11 }} allowDecimals={false} />
+                  <YAxis type="category" dataKey="tipo" tick={{ fontSize: 11 }} />
                   <Tooltip
                     contentStyle={{
                       backgroundColor: "#020617",
@@ -710,19 +737,9 @@ const Dashboard: React.FC = () => {
                       fontSize: 12,
                     }}
                   />
-                  <Bar
-                    dataKey="value"
-                    name="Quantidade"
-                    fill="url(#tipoGradient)"
-                  />
+                  <Bar dataKey="value" name="Quantidade" fill="url(#tipoGradient)" />
                   <defs>
-                    <linearGradient
-                      id="tipoGradient"
-                      x1="0"
-                      y1="0"
-                      x2="1"
-                      y2="0"
-                    >
+                    <linearGradient id="tipoGradient" x1="0" y1="0" x2="1" y2="0">
                       <stop offset="0%" stopColor="#22c55e" />
                       <stop offset="100%" stopColor="#0ea5e9" />
                     </linearGradient>
@@ -792,8 +809,8 @@ const Dashboard: React.FC = () => {
                 <div>
                   <h3>Produtividade - últimos 7 dias</h3>
                   <p className="dashboard-chart-sub">
-                    Quantidade de ordens concluídas por dia, considerando o
-                    período e a data final como referência.
+                    Quantidade de ordens concluídas por dia, considerando o período
+                    e a data final como referência.
                   </p>
                 </div>
               </div>
@@ -814,19 +831,9 @@ const Dashboard: React.FC = () => {
                         fontSize: 12,
                       }}
                     />
-                    <Bar
-                      dataKey="concluidas"
-                      name="Concluídas"
-                      fill="url(#prodGradient)"
-                    />
+                    <Bar dataKey="concluidas" name="Concluídas" fill="url(#prodGradient)" />
                     <defs>
-                      <linearGradient
-                        id="prodGradient"
-                        x1="0"
-                        y1="0"
-                        x2="0"
-                        y2="1"
-                      >
+                      <linearGradient id="prodGradient" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="0%" stopColor="#22c55e" />
                         <stop offset="100%" stopColor="#166534" />
                       </linearGradient>
@@ -838,16 +845,12 @@ const Dashboard: React.FC = () => {
           </div>
         ) : (
           <div className="dashboard-charts-grid">
-            <div
-              className="dashboard-chart-card"
-              style={{ gridColumn: "1 / -1" }}
-            >
+            <div className="dashboard-chart-card" style={{ gridColumn: "1 / -1" }}>
               <div className="dashboard-chart-header">
                 <div>
                   <h3>Produtividade - últimos 7 dias</h3>
                   <p className="dashboard-chart-sub">
-                    Quantidade de ordens concluídas por dia, apenas deste
-                    serviço.
+                    Quantidade de ordens concluídas por dia, apenas deste serviço.
                   </p>
                 </div>
               </div>
@@ -868,19 +871,9 @@ const Dashboard: React.FC = () => {
                         fontSize: 12,
                       }}
                     />
-                    <Bar
-                      dataKey="concluidas"
-                      name="Concluídas"
-                      fill="url(#prodGradient)"
-                    />
+                    <Bar dataKey="concluidas" name="Concluídas" fill="url(#prodGradient)" />
                     <defs>
-                      <linearGradient
-                        id="prodGradient"
-                        x1="0"
-                        y1="0"
-                        x2="0"
-                        y2="1"
-                      >
+                      <linearGradient id="prodGradient" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="0%" stopColor="#22c55e" />
                         <stop offset="100%" stopColor="#166534" />
                       </linearGradient>

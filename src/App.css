@@ -1941,3 +1941,230 @@ body {
     display: none !important;
   }
 }
+
+
+.notif-wrapper {
+  position: relative;
+}
+
+.notif-btn {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  border: 1px solid #1f2937;
+  background: #0b1220;
+  color: #e5e7eb;
+  border-radius: 10px;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+}
+
+.notif-btn:hover {
+  filter: brightness(1.1);
+}
+
+.notif-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+  border: 2px solid #0b1220;
+}
+
+.notif-popover {
+  position: absolute;
+  right: 0;
+  top: 46px;
+  width: 280px;
+  background: #0b1220;
+  border: 1px solid #1f2937;
+  border-radius: 12px;
+  padding: 12px;
+  z-index: 999;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+
+.notif-title {
+  font-weight: 700;
+  margin-bottom: 8px;
+  color: #e5e7eb;
+}
+
+.notif-item,
+.notif-empty {
+  font-size: 13px;
+  color: #cbd5e1;
+  margin-top: 6px;
+}
+
+/* Garante que a TOPBAR fique acima do conteúdo do dashboard */
+.topbar {
+  position: sticky; /* ou 'relative' se você não quiser sticky */
+  top: 0;
+  z-index: 5000;
+}
+
+/* Evita qualquer corte por overflow */
+.app-main {
+  position: relative;
+  overflow: visible;
+}
+
+.topbar-user {
+  overflow: visible;
+}
+
+/* Popover sempre acima de tudo */
+.notif-popover {
+  z-index: 6000;
+}
+
+
+/* Notificações (nova UI off-white) */
+.notif2-wrapper {
+  position: relative;
+}
+
+.notif2-btn {
+  position: relative;
+  width: 42px;
+  height: 42px;
+  border: 1px solid #d1d5db;
+  background: #ffffff;
+  color: #0f172a;
+  border-radius: 12px;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+}
+
+.notif2-btn:hover {
+  filter: brightness(0.98);
+}
+
+.notif2-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #ef4444;
+  color: #ffffff;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+  border: 2px solid #ffffff;
+}
+
+/* garante que fique acima do dashboard */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 5000;
+}
+
+.notif2-popover {
+  position: absolute;
+  right: 0;
+  top: 50px;
+  width: 360px;
+  background: #f8fafc; /* off-white */
+  border: 1px solid #e5e7eb;
+  border-radius: 14px;
+  padding: 12px;
+  z-index: 6000;
+  box-shadow: 0 18px 45px rgba(15, 23, 42, 0.18);
+}
+
+.notif2-head {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.notif2-title {
+  font-weight: 800;
+  color: #0f172a;
+  font-size: 14px;
+}
+
+.notif2-sub {
+  margin-top: 2px;
+  font-size: 12px;
+  color: #475569;
+  max-width: 250px;
+}
+
+.notif2-clear {
+  border: 1px solid #d1d5db;
+  background: #ffffff;
+  color: #0f172a;
+  border-radius: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.notif2-clear:hover {
+  filter: brightness(0.98);
+}
+
+.notif2-empty {
+  background: #ffffff;
+  border: 1px dashed #d1d5db;
+  color: #475569;
+  border-radius: 12px;
+  padding: 12px;
+  font-size: 13px;
+}
+
+.notif2-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 320px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.notif2-item {
+  text-align: left;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: transform 0.05s ease, filter 0.15s ease;
+}
+
+.notif2-item:hover {
+  filter: brightness(0.985);
+  transform: translateY(-1px);
+}
+
+.notif2-item-title {
+  font-size: 13px;
+  color: #0f172a;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.notif2-item-meta {
+  margin-top: 6px;
+  font-size: 11px;
+  color: #64748b;
+}
