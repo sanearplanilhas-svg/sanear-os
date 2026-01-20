@@ -57,12 +57,30 @@ type FirestoreOS = {
 
 type StatusType = "success" | "error" | "info";
 
+type StatusFiltroOs = "TODAS" | "ABERTAS" | "FECHADAS";
+type OrdenacaoCampoOs = "createdAt" | "dataExecucao";
+type OrdenacaoDirecaoOs = "asc" | "desc";
+
 type NormalizedPhoto = {
   id: string;
   label: string;
   url: string;
   sourceIndex: number; // índice original no array salvo no Firestore
 };
+
+type PhotoModalTipo = "abertura" | "execucao";
+
+type PhotoModalState = {
+  osId: string;
+  origem: OrigemOS;
+  tipo: PhotoModalTipo;
+  currentIndex: number;
+};
+
+type PrintPhotoState = {
+  title: string;
+  url: string;
+} | null;
 
 // FRONTEND APENAS: labels amigáveis
 const tipoLabelMap: Record<string, string> = {
@@ -101,7 +119,6 @@ function toDateTimeLocal(value?: Timestamp | null): string {
 
 // Evita problemas de fuso/parse do Date() com string ISO sem timezone
 function fromDateTimeLocal(value: string): Date {
-  // value: "YYYY-MM-DDTHH:MM"
   const [datePart, timePart] = value.split("T");
   const [y, m, d] = datePart.split("-").map(Number);
   const [hh, mm] = (timePart || "00:00").split(":").map(Number);
@@ -113,6 +130,10 @@ function isAdmRole(role?: string | null): boolean {
   return r === "ADMIN" || r === "ADM";
 }
 
+/**
+ * CORREÇÃO: prioriza URL/publicUrl/downloadURL antes de base64,
+ * evitando mostrar foto errada quando existir ambos.
+ */
 function normalizeFotos(fotos: any): NormalizedPhoto[] {
   if (!Array.isArray(fotos)) return [];
   return fotos
@@ -120,10 +141,10 @@ function normalizeFotos(fotos: any): NormalizedPhoto[] {
       if (!f) return null;
 
       const url =
-        (typeof f.base64 === "string" && f.base64) ||
         (typeof f.url === "string" && f.url) ||
         (typeof f.publicUrl === "string" && f.publicUrl) ||
         (typeof f.downloadURL === "string" && f.downloadURL) ||
+        (typeof f.base64 === "string" && f.base64) ||
         (typeof f === "string" ? f : "");
 
       if (!url) return null;
@@ -172,28 +193,16 @@ function wrapPdfText(
     }
   }
 
-  if (currentLine) {
-    lines.push(currentLine);
-  }
-
+  if (currentLine) lines.push(currentLine);
   return lines;
 }
 
-// remove acentos e caracteres estranhos para usar no path do Supabase
 function sanitizeForStoragePath(name: string): string {
   return name
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/[^a-zA-Z0-9.\-_]/g, "_");
 }
-
-type PhotoModalTipo = "abertura" | "execucao";
-
-type PhotoModalState = {
-  os: FirestoreOS;
-  tipo: PhotoModalTipo; // operador (abertura) ou terceirizada (execução)
-  currentIndex: number;
-};
 
 // Normaliza o nome dos campos de fotos da abertura (operador)
 function resolveFotosAbertura(raw: any): any[] | null {
@@ -223,10 +232,30 @@ const ListaOrdensServico: React.FC = () => {
   const [ordensAsfalto, setOrdensAsfalto] = useState<FirestoreOS[]>([]);
 
   const [busca, setBusca] = useState("");
+
+  // filtros adicionais (sem alterar o buscar)
+  const [filtroDataCriacao, setFiltroDataCriacao] = useState<string>("");
+  const [filtroStatus, setFiltroStatus] = useState<StatusFiltroOs>("TODAS");
+  const [ordenacaoCampo, setOrdenacaoCampo] =
+    useState<OrdenacaoCampoOs>("createdAt");
+  const [ordenacaoDirecao, setOrdenacaoDirecao] =
+    useState<OrdenacaoDirecaoOs>("desc");
   const [loading, setLoading] = useState(true);
 
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [statusType, setStatusType] = useState<StatusType>("info");
+
+  const [alertModal, setAlertModal] = useState<
+    { title: string; message: string } | null
+  >(null);
+
+  function openAlertModal(title: string, message: string) {
+    setAlertModal({ title, message });
+  }
+
+  function closeAlertModal() {
+    setAlertModal(null);
+  }
 
   // modal de detalhes (texto / edição)
   const [detailsModalOs, setDetailsModalOs] = useState<FirestoreOS | null>(null);
@@ -240,6 +269,9 @@ const ListaOrdensServico: React.FC = () => {
   const [photoModal, setPhotoModal] = useState<PhotoModalState | null>(null);
   const addPhotoInputRef = useRef<HTMLInputElement | null>(null);
 
+  // imprimir foto SEM pop-up
+  const [printPhoto, setPrintPhoto] = useState<PrintPhotoState>(null);
+
   // usuário atual (para controle de edição)
   const [currentUserEmail, setCurrentUserEmail] = useState<string | null>(null);
   const [currentUserRole, setCurrentUserRole] = useState<string | null>(null);
@@ -252,7 +284,6 @@ const ListaOrdensServico: React.FC = () => {
     const user = auth.currentUser;
     setCurrentUserEmail(user?.email ?? null);
 
-    // alinhado com App.tsx (sanear-role), com fallback para userRole
     const storedRole =
       localStorage.getItem("sanear-role") ?? localStorage.getItem("userRole");
     setCurrentUserRole(storedRole);
@@ -390,6 +421,29 @@ const ListaOrdensServico: React.FC = () => {
     }
   }, [loading, ordensBuraco, ordensAsfalto]);
 
+  const ordens = useMemo(() => {
+    return [...ordensBuraco, ...ordensAsfalto];
+  }, [ordensBuraco, ordensAsfalto]);
+
+  const ordensByKey = useMemo(() => {
+    const m = new Map<string, FirestoreOS>();
+    for (const o of ordens) m.set(`${o.origem}:${o.id}`, o);
+    return m;
+  }, [ordens]);
+
+  function getOsBy(origem: OrigemOS, id: string): FirestoreOS | null {
+    return ordensByKey.get(`${origem}:${id}`) ?? null;
+  }
+
+  // Mantém detailsModalOs sincronizado com snapshots (sem sobrescrever edição ativa)
+  useEffect(() => {
+    if (!detailsModalOs) return;
+    if (isEditingDetails) return;
+    const fresh = getOsBy(detailsModalOs.origem, detailsModalOs.id);
+    if (!fresh) return;
+    setDetailsModalOs(fresh);
+  }, [ordensByKey, detailsModalOs, isEditingDetails]);
+
   // regra de permissão: criador OU admin OU diretor
   const canEditOs = (os: FirestoreOS): boolean => {
     const emailAtual = currentUserEmail?.toLowerCase() ?? null;
@@ -406,22 +460,43 @@ const ListaOrdensServico: React.FC = () => {
     return isCreator || isAdmin || isDiretor;
   };
 
-  const ordens = useMemo(() => {
-    const todas = [...ordensBuraco, ...ordensAsfalto];
-    return todas.sort((a, b) => {
-      const aMillis =
-        a.createdAt && typeof a.createdAt.toMillis === "function"
-          ? a.createdAt.toMillis()
-          : 0;
-      const bMillis =
-        b.createdAt && typeof b.createdAt.toMillis === "function"
-          ? b.createdAt.toMillis()
-          : 0;
-      return bMillis - aMillis;
-    });
-  }, [ordensBuraco, ordensAsfalto]);
+  function isOsFechada(os: FirestoreOS): boolean {
+    const status = String(os.status ?? "ABERTA").trim().toUpperCase();
+    if (!status || status === "ABERTA" || status === "ABERTO") return false;
 
-  const filtradas = useMemo(() => {
+    if (status.startsWith("CONCLU")) return true;
+    if (status.startsWith("CANCEL")) return true;
+    if (status.startsWith("FECH")) return true;
+    if (status.startsWith("ENCERR")) return true;
+
+    if (os.dataExecucao) return true;
+    return false;
+  }
+
+  function isSameLocalDate(
+    ts: Timestamp | null | undefined,
+    yyyyMmDd: string
+  ): boolean {
+    try {
+      if (!ts) return false;
+      if (!yyyyMmDd) return true;
+
+      const parts = yyyyMmDd.split("-").map((n) => Number(n));
+      if (parts.length !== 3) return false;
+      const [y, m, d] = parts;
+
+      const date = ts.toDate();
+      return (
+        date.getFullYear() === y &&
+        date.getMonth() + 1 === m &&
+        date.getDate() === d
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  const filtradasBusca = useMemo(() => {
     const texto = busca.trim().toLowerCase();
     if (!texto) return ordens;
 
@@ -440,11 +515,78 @@ const ListaOrdensServico: React.FC = () => {
     });
   }, [busca, ordens]);
 
+  const filtradas = useMemo(() => {
+    let lista = [...filtradasBusca];
+
+    if (filtroDataCriacao) {
+      lista = lista.filter((os) =>
+        isSameLocalDate(os.createdAt, filtroDataCriacao)
+      );
+    }
+
+    if (filtroStatus !== "TODAS") {
+      lista = lista.filter((os) => {
+        const fechada = isOsFechada(os);
+        return filtroStatus === "ABERTAS" ? !fechada : fechada;
+      });
+    }
+
+    const getMillis = (os: FirestoreOS): number | null => {
+      const ts = ordenacaoCampo === "createdAt" ? os.createdAt : os.dataExecucao;
+      const ms = ts && typeof ts.toMillis === "function" ? ts.toMillis() : null;
+      return typeof ms === "number" && ms > 0 ? ms : null;
+    };
+
+    lista.sort((a, b) => {
+      const aMs = getMillis(a);
+      const bMs = getMillis(b);
+
+      const aHas = aMs !== null;
+      const bHas = bMs !== null;
+
+      if (!aHas && !bHas) {
+        const aCreated =
+          a.createdAt && typeof a.createdAt.toMillis === "function"
+            ? a.createdAt.toMillis()
+            : 0;
+        const bCreated =
+          b.createdAt && typeof b.createdAt.toMillis === "function"
+            ? b.createdAt.toMillis()
+            : 0;
+        return bCreated - aCreated;
+      }
+      if (!aHas) return 1;
+      if (!bHas) return -1;
+
+      const diff = (aMs as number) - (bMs as number);
+      if (diff === 0) {
+        const aCreated =
+          a.createdAt && typeof a.createdAt.toMillis === "function"
+            ? a.createdAt.toMillis()
+            : 0;
+        const bCreated =
+          b.createdAt && typeof b.createdAt.toMillis === "function"
+            ? b.createdAt.toMillis()
+            : 0;
+        return bCreated - aCreated;
+      }
+
+      return ordenacaoDirecao === "asc" ? diff : -diff;
+    });
+
+    return lista;
+  }, [
+    filtradasBusca,
+    filtroDataCriacao,
+    filtroStatus,
+    ordenacaoCampo,
+    ordenacaoDirecao,
+  ]);
+
   function handleSearchChange(e: ChangeEvent<HTMLInputElement>) {
     setBusca(e.target.value);
   }
 
-  // gera um PDF novo com todos os dados da OS em formato de "tabela"
   async function generateOsDataPdfUrl(os: FirestoreOS): Promise<string> {
     const pdfDoc = await PDFDocument.create();
     const page = pdfDoc.addPage();
@@ -462,7 +604,6 @@ const ListaOrdensServico: React.FC = () => {
 
     let y = height - 60;
 
-    // Título
     const titulo = `ORDEM DE SERVIÇO - ${
       os.ordemServico || os.protocolo || os.id
     }`;
@@ -495,31 +636,19 @@ const ListaOrdensServico: React.FC = () => {
       { label: "Número", value: os.numero || "-" },
       { label: "Ponto de referência", value: os.pontoReferencia || "-" },
       { label: "Status", value: os.status || "ABERTA" },
-      {
-        label: "Data de criação",
-        value: formatDateTime(os.createdAt),
-      },
-      {
-        label: "Data de execução",
-        value: formatDateTime(os.dataExecucao),
-      },
-      {
-        label: "Criado por",
-        value: os.createdByEmail || "-",
-      },
+      { label: "Data de criação", value: formatDateTime(os.createdAt) },
+      { label: "Data de execução", value: formatDateTime(os.dataExecucao) },
+      { label: "Criado por", value: os.createdByEmail || "-" },
       {
         label: "Observações",
-        value:
-          (os.observacoes || "").replace(/\s+/g, " ").trim() || "-",
+        value: (os.observacoes || "").replace(/\s+/g, " ").trim() || "-",
       },
     ];
 
     const labelGap = 4;
 
     rows.forEach(({ label, value }) => {
-      if (y < 80) {
-        return;
-      }
+      if (y < 80) return;
 
       const labelText = `${label}: `;
       const labelWidth = boldFont.widthOfTextAtSize(labelText, fontSize);
@@ -568,7 +697,6 @@ const ListaOrdensServico: React.FC = () => {
     return URL.createObjectURL(blob);
   }
 
-  // abrir modal de PDF com dados da OS
   async function handleOpenPdfModal(
     os: FirestoreOS,
     e: MouseEvent<HTMLButtonElement>
@@ -607,8 +735,6 @@ const ListaOrdensServico: React.FC = () => {
     setPdfModalLoading(false);
   }
 
-  // Imprimir usando o mesmo comportamento do Dashboard:
-  // dispara a caixa de impressão do navegador para a tela atual
   function handlePrintCurrentPdf() {
     window.print();
   }
@@ -641,12 +767,11 @@ const ListaOrdensServico: React.FC = () => {
     setIsEditingDetails(false);
   }
 
-  // salvar alterações dos campos editados (modal de detalhes)
   async function handleSaveDetails() {
     if (!detailsModalOs) return;
+
     if (!canEditOs(detailsModalOs)) {
-      setStatusMessage("Você não tem permissão para editar esta OS.");
-      setStatusType("error");
+      openAlertModal("Sem permissão", "Você não tem permissão para editar esta OS.");
       return;
     }
 
@@ -668,7 +793,6 @@ const ListaOrdensServico: React.FC = () => {
         observacoes: detailsModalOs.observacoes || null,
         status: detailsModalOs.status || null,
 
-        // SOMENTE ADM/ADMIN pode alterar data/hora de execução
         ...(isAdmRole(currentUserRole)
           ? { dataExecucao: detailsModalOs.dataExecucao ?? null }
           : {}),
@@ -690,7 +814,6 @@ const ListaOrdensServico: React.FC = () => {
     }
   }
 
-  // fotos só para usar nos botões / modal de fotos
   const fotosAberturaDetalhes: NormalizedPhoto[] = useMemo(() => {
     if (!detailsModalOs) return [];
     return normalizeFotos(detailsModalOs.fotos);
@@ -705,24 +828,17 @@ const ListaOrdensServico: React.FC = () => {
     detailsModalOs && canEditOs(detailsModalOs) ? true : false;
   const readOnlyEditableFields = !isEditingDetails || !canEditCurrent;
 
-  // ------- MODAL DE FOTOS (ABERTURA / EXECUÇÃO) ---------
-
   function openPhotoModalForOs(os: FirestoreOS, preferido?: PhotoModalTipo) {
     const temAbertura = normalizeFotos(os.fotos).length > 0;
     const temExecucao = normalizeFotos(os.fotosExecucao).length > 0;
 
     let tipo: PhotoModalTipo = "abertura";
-
-    if (preferido) {
-      tipo = preferido;
-    } else if (!temAbertura && temExecucao) {
-      tipo = "execucao";
-    } else {
-      tipo = "abertura";
-    }
+    if (preferido) tipo = preferido;
+    else if (!temAbertura && temExecucao) tipo = "execucao";
 
     setPhotoModal({
-      os,
+      osId: os.id,
+      origem: os.origem,
       tipo,
       currentIndex: 0,
     });
@@ -741,12 +857,15 @@ const ListaOrdensServico: React.FC = () => {
     setPhotoModal(null);
   }
 
-  function getFotosFromModalState(
-    state: PhotoModalState | null
-  ): NormalizedPhoto[] {
-    if (!state) return [];
-    const { os, tipo } = state;
-    return normalizeFotos(tipo === "abertura" ? os.fotos : os.fotosExecucao);
+  function getOsFromPhotoModal(state: PhotoModalState | null): FirestoreOS | null {
+    if (!state) return null;
+    return getOsBy(state.origem, state.osId);
+  }
+
+  function getFotosFromModalState(state: PhotoModalState | null): NormalizedPhoto[] {
+    const os = getOsFromPhotoModal(state);
+    if (!os || !state) return [];
+    return normalizeFotos(state.tipo === "abertura" ? os.fotos : os.fotosExecucao);
   }
 
   function goToNextPhoto() {
@@ -764,83 +883,57 @@ const ListaOrdensServico: React.FC = () => {
       if (!prev) return prev;
       const fotos = getFotosFromModalState(prev);
       if (fotos.length === 0) return prev;
-      const prevIndex =
-        (prev.currentIndex - 1 + fotos.length) % fotos.length;
+      const prevIndex = (prev.currentIndex - 1 + fotos.length) % fotos.length;
       return { ...prev, currentIndex: prevIndex };
     });
   }
 
   async function handleDeleteCurrentPhoto() {
     if (!photoModal) return;
-    if (!canEditOs(photoModal.os)) {
-      setStatusMessage("Você não tem permissão para excluir fotos desta OS.");
-      setStatusType("error");
+
+    const os = getOsFromPhotoModal(photoModal);
+    if (!os) {
+      openAlertModal("OS não encontrada", "Não foi possível localizar esta OS.");
+      return;
+    }
+
+    if (!canEditOs(os)) {
+      openAlertModal("Sem permissão", "Você não tem permissão para excluir fotos desta OS.");
       return;
     }
 
     const fotosNormalizadas = getFotosFromModalState(photoModal);
     if (fotosNormalizadas.length === 0) return;
 
-    const confirmDelete = window.confirm(
-      "Tem certeza que deseja excluir esta foto?"
-    );
+    const confirmDelete = window.confirm("Tem certeza que deseja excluir esta foto?");
     if (!confirmDelete) return;
 
-    const { os, tipo, currentIndex } = photoModal;
+    const { tipo, currentIndex } = photoModal;
     const fotoAtual = fotosNormalizadas[currentIndex];
 
     try {
-      const collectionName =
-        os.origem === "asfalto" ? "ordensServico" : "ordens_servico";
+      const collectionName = os.origem === "asfalto" ? "ordensServico" : "ordens_servico";
 
-      const originalArray: any[] =
-        (tipo === "abertura" ? os.fotos : os.fotosExecucao) || [];
-
-      const updatedArray = originalArray.filter(
-        (_f, idx) => idx !== fotoAtual.sourceIndex
-      );
+      const originalArray: any[] = (tipo === "abertura" ? os.fotos : os.fotosExecucao) || [];
+      const updatedArray = originalArray.filter((_f, idx) => idx !== fotoAtual.sourceIndex);
 
       await updateDoc(doc(db, collectionName, os.id), {
         [tipo === "abertura" ? "fotos" : "fotosExecucao"]: updatedArray,
         updatedAt: serverTimestamp(),
       });
 
-      setDetailsModalOs((prev) => {
-        if (!prev || prev.id !== os.id) return prev;
-        return {
-          ...prev,
-          [tipo === "abertura" ? "fotos" : "fotosExecucao"]: updatedArray,
-        } as FirestoreOS;
-      });
-
-      const normalizadosNovos = normalizeFotos(updatedArray);
-      let newIndex = currentIndex;
-      if (normalizadosNovos.length === 0) {
-        newIndex = 0;
-      } else if (newIndex >= normalizadosNovos.length) {
-        newIndex = normalizadosNovos.length - 1;
-      }
-
-      setPhotoModal((prev) =>
-        prev && prev.os.id === os.id && prev.tipo === tipo
-          ? {
-              ...prev,
-              os: {
-                ...prev.os,
-                [tipo === "abertura" ? "fotos" : "fotosExecucao"]: updatedArray,
-              },
-              currentIndex: newIndex,
-            }
-          : prev
-      );
-
       setStatusMessage("Foto excluída com sucesso.");
       setStatusType("success");
+
+      setPhotoModal((prev) => {
+        if (!prev) return prev;
+        const normalizedNew = normalizeFotos(updatedArray);
+        const nextIndex = normalizedNew.length === 0 ? 0 : Math.min(prev.currentIndex, normalizedNew.length - 1);
+        return { ...prev, currentIndex: nextIndex };
+      });
     } catch (error) {
       console.error(error);
-      setStatusMessage(
-        "Não foi possível excluir a foto. Tente novamente mais tarde."
-      );
+      setStatusMessage("Não foi possível excluir a foto. Tente novamente mais tarde.");
       setStatusType("error");
     }
   }
@@ -856,27 +949,31 @@ const ListaOrdensServico: React.FC = () => {
       return;
     }
 
+    const os = getOsFromPhotoModal(photoModal);
+    if (!os) {
+      e.target.value = "";
+      openAlertModal("OS não encontrada", "Não foi possível localizar esta OS para adicionar fotos.");
+      return;
+    }
+
     const files = e.target.files;
     if (!files || files.length === 0) {
       e.target.value = "";
       return;
     }
 
-    const { os, tipo } = photoModal;
+    if (!canEditOs(os)) {
+      e.target.value = "";
+      openAlertModal("Sem permissão", "Você não tem permissão para adicionar fotos nesta OS.");
+      return;
+    }
+
+    const { tipo } = photoModal;
 
     const validFiles = Array.from(files).filter((file) => {
       if (file.type && file.type.startsWith("image/")) return true;
       const name = file.name.toLowerCase();
-      const exts = [
-        ".jpg",
-        ".jpeg",
-        ".png",
-        ".gif",
-        ".webp",
-        ".bmp",
-        ".heic",
-        ".heif",
-      ];
+      const exts = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".heic", ".heif"];
       return exts.some((ext) => name.endsWith(ext));
     });
 
@@ -915,31 +1012,18 @@ const ListaOrdensServico: React.FC = () => {
 
         if (uploadError) {
           console.error(uploadError);
-          throw new Error(
-            `Erro ao enviar foto "${originalName}" para o armazenamento.`
-          );
+          throw new Error(`Erro ao enviar foto "${originalName}" para o armazenamento.`);
         }
 
-        const { data } = supabase.storage
-          .from(STORAGE_BUCKET)
-          .getPublicUrl(path);
-
+        const { data } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(path);
         const url = data.publicUrl;
 
-        novosItens.push({
-          id,
-          nomeArquivo: originalName,
-          dataAnexoTexto,
-          url,
-        });
+        novosItens.push({ id, nomeArquivo: originalName, dataAnexoTexto, url });
       }
 
-      const collectionName =
-        os.origem === "asfalto" ? "ordensServico" : "ordens_servico";
+      const collectionName = os.origem === "asfalto" ? "ordensServico" : "ordens_servico";
 
-      const originalArray: any[] =
-        (tipo === "abertura" ? os.fotos : os.fotosExecucao) || [];
-
+      const originalArray: any[] = (tipo === "abertura" ? os.fotos : os.fotosExecucao) || [];
       const updatedArray = [...originalArray, ...novosItens];
 
       await updateDoc(doc(db, collectionName, os.id), {
@@ -947,45 +1031,136 @@ const ListaOrdensServico: React.FC = () => {
         updatedAt: serverTimestamp(),
       });
 
-      setDetailsModalOs((prev) => {
-        if (!prev || prev.id !== os.id) return prev;
-        return {
-          ...prev,
-          [tipo === "abertura" ? "fotos" : "fotosExecucao"]: updatedArray,
-        } as FirestoreOS;
-      });
-
-      const normalized = normalizeFotos(updatedArray);
-
-      setPhotoModal((prev) =>
-        prev && prev.os.id === os.id && prev.tipo === tipo
-          ? {
-              ...prev,
-              os: {
-                ...prev.os,
-                [tipo === "abertura" ? "fotos" : "fotosExecucao"]: updatedArray,
-              },
-              currentIndex: normalized.length > 0 ? normalized.length - 1 : 0,
-            }
-          : prev
-      );
-
       setStatusMessage("Foto(s) adicionada(s) com sucesso.");
       setStatusType("success");
+
+      // vai para a última foto
+      setPhotoModal((prev) => (prev ? { ...prev, currentIndex: updatedArray.length - 1 } : prev));
     } catch (error) {
       console.error(error);
-      setStatusMessage(
-        "Não foi possível adicionar as fotos. Tente novamente mais tarde."
-      );
+      setStatusMessage("Não foi possível adicionar as fotos. Tente novamente mais tarde.");
       setStatusType("error");
     } finally {
       e.target.value = "";
     }
   }
 
-  // ----------- RENDER -------------
+  // IMPRIMIR FOTO (SEM POPUP)
+  function handlePrintCurrentPhoto() {
+    if (!photoModal) return;
+
+    const os = getOsFromPhotoModal(photoModal);
+    if (!os) {
+      openAlertModal("OS não encontrada", "Não foi possível localizar esta OS para imprimir a foto.");
+      return;
+    }
+
+    const fotos = getFotosFromModalState(photoModal);
+    if (fotos.length === 0) {
+      openAlertModal("Sem fotos", "Não há fotos para imprimir nesta aba.");
+      return;
+    }
+
+    const foto = fotos[photoModal.currentIndex] ?? fotos[0];
+    const titulo = `OS ${os.ordemServico || os.protocolo || os.id} - ${foto.label || "Foto"}`;
+
+    setPrintPhoto({ title: titulo, url: foto.url });
+  }
+
+  useEffect(() => {
+    if (!printPhoto) return;
+
+    document.body.classList.add("print-photo-active");
+
+    const onAfterPrint = () => {
+      document.body.classList.remove("print-photo-active");
+      setPrintPhoto(null);
+    };
+
+    window.addEventListener("afterprint", onAfterPrint);
+
+    const fallback = window.setTimeout(() => {
+      document.body.classList.remove("print-photo-active");
+      setPrintPhoto(null);
+    }, 15000);
+
+    const tryPrint = () => {
+      setTimeout(() => {
+        try {
+          window.print();
+        } catch {
+          document.body.classList.remove("print-photo-active");
+          setPrintPhoto(null);
+        }
+      }, 50);
+    };
+
+    const img = document.getElementById("print-photo-img") as HTMLImageElement | null;
+    if (img) {
+      if (img.complete) {
+        tryPrint();
+      } else {
+        const done = () => tryPrint();
+        img.addEventListener("load", done, { once: true });
+        img.addEventListener("error", done, { once: true });
+      }
+    } else {
+      tryPrint();
+    }
+
+    return () => {
+      window.removeEventListener("afterprint", onAfterPrint);
+      window.clearTimeout(fallback);
+      document.body.classList.remove("print-photo-active");
+    };
+  }, [printPhoto]);
+
+  const stickyHeaderCellStyle = {
+    position: "sticky" as const,
+    top: 0,
+    zIndex: 8,
+    background: "#fff",
+    boxShadow: "0 1px 0 rgba(0,0,0,0.08)",
+  };
+
   return (
     <section className="page-card">
+      <style>{`
+        @media screen {
+          #print-area { display: none; }
+        }
+        @media print {
+          body.print-photo-active * { visibility: hidden !important; }
+          body.print-photo-active #print-area,
+          body.print-photo-active #print-area * { visibility: visible !important; }
+          body.print-photo-active #print-area {
+            display: block !important;
+            position: fixed;
+            inset: 0;
+            padding: 12mm;
+            background: #fff;
+          }
+          body.print-photo-active #print-area .print-title {
+            margin: 0 0 8mm 0;
+            font-size: 14px;
+            font-weight: 600;
+          }
+          body.print-photo-active #print-area img {
+            width: 100%;
+            height: auto;
+            max-height: calc(100vh - 30mm);
+            object-fit: contain;
+          }
+        }
+      `}</style>
+
+      {printPhoto && (
+        <div id="print-area">
+          <p className="print-title">{printPhoto.title}</p>
+          <img id="print-photo-img" src={printPhoto.url} alt={printPhoto.title} />
+        </div>
+      )}
+
       <header className="page-header">
         <div>
           <h2>Lista de Ordens de Serviço</h2>
@@ -997,13 +1172,94 @@ const ListaOrdensServico: React.FC = () => {
       </header>
 
       {statusMessage && (
-        <div className={`status-banner status-${statusType}`}>
-          {statusMessage}
+        <div className={`status-banner status-${statusType}`}>{statusMessage}</div>
+      )}
+
+      {alertModal && (
+        <div className="modal-backdrop" onClick={closeAlertModal}>
+          <div
+            className="modal"
+            onClick={(e) => e.stopPropagation()}
+            style={{ maxWidth: "560px", width: "92%" }}
+          >
+            <div className="modal-header">
+              <h3 className="modal-title">{alertModal.title}</h3>
+              <button type="button" className="modal-close" onClick={closeAlertModal}>
+                ×
+              </button>
+            </div>
+
+            <div className="modal-body">
+              <p style={{ whiteSpace: "pre-line" }}>{alertModal.message}</p>
+            </div>
+
+            <div className="modal-footer">
+              <button type="button" className="btn-primary" onClick={closeAlertModal}>
+                OK
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
-      {/* Barra de pesquisa */}
+      {/* Filtros + busca (Buscar continua igual) */}
       <div className="os-toolbar">
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: "0.9rem",
+            alignItems: "flex-end",
+          }}
+        >
+          <div className="page-field" style={{ minWidth: 190 }}>
+            <label>Data de criação</label>
+            <input
+              type="date"
+              value={filtroDataCriacao}
+              onChange={(e) => setFiltroDataCriacao(e.target.value)}
+            />
+          </div>
+
+          <div className="page-field" style={{ minWidth: 170 }}>
+            <label>Status</label>
+            <select
+              value={filtroStatus}
+              onChange={(e) => setFiltroStatus(e.target.value as StatusFiltroOs)}
+            >
+              <option value="TODAS">Todas</option>
+              <option value="ABERTAS">Abertas</option>
+              <option value="FECHADAS">Fechadas</option>
+            </select>
+          </div>
+
+          <div className="page-field" style={{ minWidth: 210 }}>
+            <label>Ordenar por</label>
+            <select
+              value={ordenacaoCampo}
+              onChange={(e) => setOrdenacaoCampo(e.target.value as OrdenacaoCampoOs)}
+            >
+              <option value="createdAt">Data de criação</option>
+              <option value="dataExecucao">Data de execução</option>
+            </select>
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
+            <span style={{ fontSize: "0.78rem", color: "#6b7280", fontWeight: 500 }}>
+              Ordem
+            </span>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() =>
+                setOrdenacaoDirecao((prev) => (prev === "asc" ? "desc" : "asc"))
+              }
+            >
+              {ordenacaoDirecao === "asc" ? "Crescente" : "Decrescente"}
+            </button>
+          </div>
+        </div>
+
         <div className="os-search">
           <input
             className="os-search-input"
@@ -1017,30 +1273,30 @@ const ListaOrdensServico: React.FC = () => {
 
       {/* Tabela principal */}
       <div className="os-main">
-        {loading && (
-          <div className="os-empty">Carregando ordens de serviço...</div>
-        )}
+        {loading && <div className="os-empty">Carregando ordens de serviço...</div>}
 
         {!loading && filtradas.length === 0 && (
-          <div className="os-empty">
-            Nenhuma ordem encontrada para os filtros atuais.
-          </div>
+          <div className="os-empty">Nenhuma ordem encontrada para os filtros atuais.</div>
         )}
 
         {!loading && filtradas.length > 0 && (
-          <div className="os-table-wrapper">
+          <div
+            className="os-table-wrapper"
+            style={{ overflow: "auto", maxHeight: "70vh" }}
+          >
             <table className="os-table">
-              <thead>
+              <thead style={{ position: "sticky", top: 0, zIndex: 9, background: "#fff" }}>
                 <tr>
-                  <th>Nº OS</th>
-                  <th>Bairro</th>
-                  <th>Rua / Avenida</th>
-                  <th>Dados da OS</th>
-                  <th>Data de criação</th>
-                  <th>Data de execução</th>
-                  <th>Ações</th>
+                  <th style={stickyHeaderCellStyle}>Nº OS</th>
+                  <th style={stickyHeaderCellStyle}>Bairro</th>
+                  <th style={stickyHeaderCellStyle}>Rua / Avenida</th>
+                  <th style={stickyHeaderCellStyle}>Dados da OS</th>
+                  <th style={stickyHeaderCellStyle}>Data de criação</th>
+                  <th style={stickyHeaderCellStyle}>Data de execução</th>
+                  <th style={stickyHeaderCellStyle}>Ações</th>
                 </tr>
               </thead>
+
               <tbody>
                 {filtradas.map((os) => {
                   const qtdAbertura = normalizeFotos(os.fotos).length;
@@ -1049,7 +1305,7 @@ const ListaOrdensServico: React.FC = () => {
 
                   return (
                     <tr
-                      key={os.id}
+                      key={`${os.origem}:${os.id}`}
                       className="os-table-row"
                       onClick={() => {
                         setDetailsModalOs(os);
@@ -1074,10 +1330,7 @@ const ListaOrdensServico: React.FC = () => {
                       <td>{formatDateTime(os.createdAt)}</td>
                       <td>{formatDateTime(os.dataExecucao)}</td>
                       <td>
-                        <div
-                          className="os-row-actions"
-                          style={{ gap: "0.5rem" }}
-                        >
+                        <div className="os-row-actions" style={{ gap: "0.5rem" }}>
                           <button
                             type="button"
                             className="btn-secondary"
@@ -1086,27 +1339,27 @@ const ListaOrdensServico: React.FC = () => {
                               openPhotoModalFromRow(os);
                             }}
                           >
-                            Ver fotos
-                            {totalFotos > 0 ? ` (${totalFotos})` : ""}
+                            Ver fotos{totalFotos > 0 ? ` (${totalFotos})` : ""}
                           </button>
 
-                          {canEditOs(os) ? (
-                            <button
-                              type="button"
-                              className="btn-secondary"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                setDetailsModalOs(os);
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            style={!canEditOs(os) ? { opacity: 0.65 } : undefined}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setDetailsModalOs(os);
+
+                              if (canEditOs(os)) {
                                 setIsEditingDetails(true);
-                              }}
-                            >
-                              Editar
-                            </button>
-                          ) : (
-                            <span className="os-table-muted">
-                              Sem permissão
-                            </span>
-                          )}
+                              } else {
+                                setIsEditingDetails(false);
+                                openAlertModal("Sem permissão", "Você não tem permissão para editar esta OS.");
+                              }
+                            }}
+                          >
+                            Editar
+                          </button>
                         </div>
                       </td>
                     </tr>
@@ -1143,25 +1396,14 @@ const ListaOrdensServico: React.FC = () => {
               }}
             >
               <h3 className="modal-title" style={{ margin: 0 }}>
-                OS{" "}
-                {pdfModalOs.ordemServico ||
-                  pdfModalOs.protocolo ||
-                  pdfModalOs.id}
+                OS {pdfModalOs.ordemServico || pdfModalOs.protocolo || pdfModalOs.id}
               </h3>
               <div style={{ display: "flex", gap: "0.5rem" }}>
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  onClick={closePdfModal}
-                >
+                <button type="button" className="btn-secondary" onClick={closePdfModal}>
                   Fechar
                 </button>
                 {!pdfModalLoading && pdfModalUrl && (
-                  <button
-                    type="button"
-                    className="btn-primary"
-                    onClick={handlePrintCurrentPdf}
-                  >
+                  <button type="button" className="btn-primary" onClick={handlePrintCurrentPdf}>
                     Imprimir
                   </button>
                 )}
@@ -1169,18 +1411,12 @@ const ListaOrdensServico: React.FC = () => {
             </div>
 
             <div style={{ flex: 1 }}>
-              {pdfModalLoading && (
-                <div className="os-empty">Gerando PDF com dados da OS...</div>
-              )}
+              {pdfModalLoading && <div className="os-empty">Gerando PDF com dados da OS...</div>}
               {!pdfModalLoading && pdfModalUrl && (
                 <iframe
                   src={pdfModalUrl}
                   title="PDF com dados da OS"
-                  style={{
-                    width: "100%",
-                    height: "100%",
-                    border: "none",
-                  }}
+                  style={{ width: "100%", height: "100%", border: "none" }}
                 />
               )}
             </div>
@@ -1188,7 +1424,7 @@ const ListaOrdensServico: React.FC = () => {
         </div>
       )}
 
-      {/* Modal de detalhes completos da OS (edição / visualização) */}
+      {/* Modal de detalhes */}
       {detailsModalOs && (
         <div className="modal-backdrop" onClick={closeDetailsModal}>
           <div
@@ -1198,10 +1434,7 @@ const ListaOrdensServico: React.FC = () => {
           >
             <div className="modal-header">
               <h3 className="modal-title">
-                Detalhes da OS{" "}
-                {detailsModalOs.ordemServico ||
-                  detailsModalOs.protocolo ||
-                  detailsModalOs.id}
+                Detalhes da OS {detailsModalOs.ordemServico || detailsModalOs.protocolo || detailsModalOs.id}
               </h3>
               <button
                 type="button"
@@ -1214,7 +1447,6 @@ const ListaOrdensServico: React.FC = () => {
             </div>
 
             <div className="modal-body">
-              {/* Identificação */}
               <div className="page-section">
                 <h3>Identificação</h3>
                 <div className="page-form-grid">
@@ -1226,9 +1458,7 @@ const ListaOrdensServico: React.FC = () => {
                       value={
                         tipoLabelMap[detailsModalOs.tipo || ""] ||
                         detailsModalOs.tipo ||
-                        (detailsModalOs.origem === "asfalto"
-                          ? "Asfalto"
-                          : "Calçamento")
+                        (detailsModalOs.origem === "asfalto" ? "Asfalto" : "Calçamento")
                       }
                     />
                   </div>
@@ -1241,9 +1471,7 @@ const ListaOrdensServico: React.FC = () => {
                       value={detailsModalOs.ordemServico ?? ""}
                       onChange={(e) =>
                         setDetailsModalOs((prev) =>
-                          prev
-                            ? { ...prev, ordemServico: e.target.value }
-                            : prev
+                          prev ? { ...prev, ordemServico: e.target.value } : prev
                         )
                       }
                     />
@@ -1279,19 +1507,13 @@ const ListaOrdensServico: React.FC = () => {
 
                   <div className="page-field">
                     <label>Data de criação</label>
-                    <input
-                      className="field-readonly"
-                      readOnly
-                      value={formatDateTime(detailsModalOs.createdAt)}
-                    />
+                    <input className="field-readonly" readOnly value={formatDateTime(detailsModalOs.createdAt)} />
                   </div>
 
                   <div className="page-field">
                     <label>Data de execução</label>
 
-                    {isEditingDetails &&
-                    canEditCurrent &&
-                    isAdmRole(currentUserRole) ? (
+                    {isEditingDetails && canEditCurrent && isAdmRole(currentUserRole) ? (
                       <input
                         className="field-readonly"
                         type="datetime-local"
@@ -1302,9 +1524,7 @@ const ListaOrdensServico: React.FC = () => {
                               ? {
                                   ...prev,
                                   dataExecucao: e.target.value
-                                    ? Timestamp.fromDate(
-                                        fromDateTimeLocal(e.target.value)
-                                      )
+                                    ? Timestamp.fromDate(fromDateTimeLocal(e.target.value))
                                     : null,
                                 }
                               : prev
@@ -1312,17 +1532,12 @@ const ListaOrdensServico: React.FC = () => {
                         }
                       />
                     ) : (
-                      <input
-                        className="field-readonly"
-                        readOnly
-                        value={formatDateTime(detailsModalOs.dataExecucao)}
-                      />
+                      <input className="field-readonly" readOnly value={formatDateTime(detailsModalOs.dataExecucao)} />
                     )}
                   </div>
                 </div>
               </div>
 
-              {/* Local */}
               <div className="page-section">
                 <h3>Local do serviço</h3>
                 <div className="page-form-grid">
@@ -1333,9 +1548,7 @@ const ListaOrdensServico: React.FC = () => {
                       readOnly={readOnlyEditableFields}
                       value={detailsModalOs.bairro ?? ""}
                       onChange={(e) =>
-                        setDetailsModalOs((prev) =>
-                          prev ? { ...prev, bairro: e.target.value } : prev
-                        )
+                        setDetailsModalOs((prev) => (prev ? { ...prev, bairro: e.target.value } : prev))
                       }
                     />
                   </div>
@@ -1347,9 +1560,7 @@ const ListaOrdensServico: React.FC = () => {
                       readOnly={readOnlyEditableFields}
                       value={detailsModalOs.rua ?? ""}
                       onChange={(e) =>
-                        setDetailsModalOs((prev) =>
-                          prev ? { ...prev, rua: e.target.value } : prev
-                        )
+                        setDetailsModalOs((prev) => (prev ? { ...prev, rua: e.target.value } : prev))
                       }
                     />
                   </div>
@@ -1361,9 +1572,7 @@ const ListaOrdensServico: React.FC = () => {
                       readOnly={readOnlyEditableFields}
                       value={detailsModalOs.numero ?? ""}
                       onChange={(e) =>
-                        setDetailsModalOs((prev) =>
-                          prev ? { ...prev, numero: e.target.value } : prev
-                        )
+                        setDetailsModalOs((prev) => (prev ? { ...prev, numero: e.target.value } : prev))
                       }
                     />
                   </div>
@@ -1376,9 +1585,7 @@ const ListaOrdensServico: React.FC = () => {
                       value={detailsModalOs.pontoReferencia ?? ""}
                       onChange={(e) =>
                         setDetailsModalOs((prev) =>
-                          prev
-                            ? { ...prev, pontoReferencia: e.target.value }
-                            : prev
+                          prev ? { ...prev, pontoReferencia: e.target.value } : prev
                         )
                       }
                     />
@@ -1386,7 +1593,6 @@ const ListaOrdensServico: React.FC = () => {
                 </div>
               </div>
 
-              {/* Observações */}
               <div className="page-section">
                 <h3>Observações</h3>
                 <div className="page-field">
@@ -1395,70 +1601,35 @@ const ListaOrdensServico: React.FC = () => {
                     readOnly={readOnlyEditableFields}
                     value={detailsModalOs.observacoes ?? ""}
                     onChange={(e) =>
-                      setDetailsModalOs((prev) =>
-                        prev
-                          ? { ...prev, observacoes: e.target.value }
-                          : prev
-                      )
+                      setDetailsModalOs((prev) => (prev ? { ...prev, observacoes: e.target.value } : prev))
                     }
                   />
                 </div>
               </div>
 
-              {/* Fotos da abertura */}
               <div className="page-section">
                 <h3>Fotos da abertura da OS (Operador)</h3>
-                <div
-                  style={{
-                    display: "flex",
-                    gap: "0.75rem",
-                    alignItems: "center",
-                    flexWrap: "wrap",
-                  }}
-                >
-                  <button
-                    type="button"
-                    className="btn-secondary"
-                    onClick={() => openPhotoModalFromDetails("abertura")}
-                  >
+                <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", flexWrap: "wrap" }}>
+                  <button type="button" className="btn-secondary" onClick={() => openPhotoModalFromDetails("abertura")}>
                     Ver fotos cadastradas
-                    {fotosAberturaDetalhes.length > 0
-                      ? ` (${fotosAberturaDetalhes.length})`
-                      : ""}
+                    {fotosAberturaDetalhes.length > 0 ? ` (${fotosAberturaDetalhes.length})` : ""}
                   </button>
                   {fotosAberturaDetalhes.length === 0 && (
-                    <span className="field-hint">
-                      Nenhuma foto cadastrada na abertura desta OS.
-                    </span>
+                    <span className="field-hint">Nenhuma foto cadastrada na abertura desta OS.</span>
                   )}
                 </div>
               </div>
 
-              {/* Fotos da execução (terceirizada) */}
               <div className="page-section">
                 <h3>Fotos da execução (Terceirizada)</h3>
-                <div
-                  style={{
-                    display: "flex",
-                    gap: "0.75rem",
-                    alignItems: "center",
-                    flexWrap: "wrap",
-                  }}
-                >
-                  <button
-                    type="button"
-                    className="btn-secondary"
-                    onClick={() => openPhotoModalFromDetails("execucao")}
-                  >
+                <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", flexWrap: "wrap" }}>
+                  <button type="button" className="btn-secondary" onClick={() => openPhotoModalFromDetails("execucao")}>
                     Ver fotos cadastradas
-                    {fotosExecucaoDetalhes.length > 0
-                      ? ` (${fotosExecucaoDetalhes.length})`
-                      : ""}
+                    {fotosExecucaoDetalhes.length > 0 ? ` (${fotosExecucaoDetalhes.length})` : ""}
                   </button>
                   {fotosExecucaoDetalhes.length === 0 && (
                     <span className="field-hint">
-                      Nenhuma foto de execução cadastrada pela terceirizada para
-                      esta OS.
+                      Nenhuma foto de execução cadastrada pela terceirizada para esta OS.
                     </span>
                   )}
                 </div>
@@ -1466,22 +1637,12 @@ const ListaOrdensServico: React.FC = () => {
             </div>
 
             <div className="modal-footer">
-              <button
-                type="button"
-                className="btn-secondary"
-                onClick={closeDetailsModal}
-                disabled={savingDetails}
-              >
+              <button type="button" className="btn-secondary" onClick={closeDetailsModal} disabled={savingDetails}>
                 Fechar
               </button>
 
               {canEditCurrent && isEditingDetails && (
-                <button
-                  type="button"
-                  className="btn-primary"
-                  onClick={handleSaveDetails}
-                  disabled={savingDetails}
-                >
+                <button type="button" className="btn-primary" onClick={handleSaveDetails} disabled={savingDetails}>
                   {savingDetails ? "Salvando..." : "Salvar alterações"}
                 </button>
               )}
@@ -1499,143 +1660,78 @@ const ListaOrdensServico: React.FC = () => {
         </div>
       )}
 
-      {/* MODAL DE FOTOS (ABERTURA / EXECUÇÃO) */}
-      {photoModal && (
-        <div className="modal-backdrop" onClick={closePhotoModal}>
-          <div
-            className="modal modal-photo"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="modal-header">
-              <h3 className="modal-title">
-                Fotos da OS{" "}
-                {photoModal.os.ordemServico ||
-                  photoModal.os.protocolo ||
-                  photoModal.os.id}
-              </h3>
-              <button
-                type="button"
-                className="modal-close"
-                onClick={closePhotoModal}
+      {/* MODAL DE FOTOS */}
+      {photoModal && (() => {
+        const os = getOsFromPhotoModal(photoModal);
+        const fotos = getFotosFromModalState(photoModal);
+        const fotoAtual = fotos[photoModal.currentIndex] ?? fotos[0];
+
+        const totalAbertura = normalizeFotos(os?.fotos).length;
+        const totalExec = normalizeFotos(os?.fotosExecucao).length;
+
+        return (
+          <div className="modal-backdrop" onClick={closePhotoModal}>
+            <div className="modal modal-photo" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <h3 className="modal-title">
+                  Fotos da OS {os?.ordemServico || os?.protocolo || os?.id || photoModal.osId}
+                </h3>
+                <button type="button" className="modal-close" onClick={closePhotoModal}>
+                  ×
+                </button>
+              </div>
+
+              <div
+                style={{
+                  padding: "0.75rem 1rem 0.5rem",
+                  borderBottom: "1px solid #e5e7eb",
+                  display: "flex",
+                  gap: "0.5rem",
+                  flexWrap: "wrap",
+                }}
               >
-                ×
-              </button>
-            </div>
+                <button
+                  type="button"
+                  className={photoModal.tipo === "abertura" ? "btn-primary" : "btn-secondary"}
+                  onClick={() => setPhotoModal((prev) => (prev ? { ...prev, tipo: "abertura", currentIndex: 0 } : prev))}
+                  disabled={totalAbertura === 0}
+                >
+                  Fotos do Operador{totalAbertura > 0 ? ` (${totalAbertura})` : ""}
+                </button>
 
-            {/* Abas Operador / Terceirizada */}
-            <div
-              style={{
-                padding: "0.75rem 1rem 0.5rem",
-                borderBottom: "1px solid #e5e7eb",
-                display: "flex",
-                gap: "0.5rem",
-                flexWrap: "wrap",
-              }}
-            >
-              {(() => {
-                const fotosAbertura = normalizeFotos(photoModal.os.fotos);
-                const fotosExec = normalizeFotos(photoModal.os.fotosExecucao);
-                const totalAbertura = fotosAbertura.length;
-                const totalExec = fotosExec.length;
+                <button
+                  type="button"
+                  className={photoModal.tipo === "execucao" ? "btn-primary" : "btn-secondary"}
+                  onClick={() => setPhotoModal((prev) => (prev ? { ...prev, tipo: "execucao", currentIndex: 0 } : prev))}
+                  disabled={totalExec === 0}
+                >
+                  Fotos da Terceirizada{totalExec > 0 ? ` (${totalExec})` : ""}
+                </button>
+              </div>
 
-                return (
-                  <>
-                    <button
-                      type="button"
-                      className={
-                        photoModal.tipo === "abertura"
-                          ? "btn-primary"
-                          : "btn-secondary"
-                      }
-                      onClick={() =>
-                        setPhotoModal((prev) =>
-                          prev
-                            ? {
-                                ...prev,
-                                tipo: "abertura",
-                                currentIndex: 0,
-                              }
-                            : prev
-                        )
-                      }
-                      disabled={totalAbertura === 0}
-                    >
-                      Fotos do Operador
-                      {totalAbertura > 0 ? ` (${totalAbertura})` : ""}
-                    </button>
-                    <button
-                      type="button"
-                      className={
-                        photoModal.tipo === "execucao"
-                          ? "btn-primary"
-                          : "btn-secondary"
-                      }
-                      onClick={() =>
-                        setPhotoModal((prev) =>
-                          prev
-                            ? {
-                                ...prev,
-                                tipo: "execucao",
-                                currentIndex: 0,
-                              }
-                            : prev
-                        )
-                      }
-                      disabled={totalExec === 0}
-                    >
-                      Fotos da Terceirizada
-                      {totalExec > 0 ? ` (${totalExec})` : ""}
-                    </button>
-                  </>
-                );
-              })()}
-            </div>
+              <div className="modal-body modal-photo-body">
+                {!os && <p className="field-hint">OS não encontrada (atualize a página).</p>}
 
-            <div className="modal-body modal-photo-body">
-              {(() => {
-                const fotos = getFotosFromModalState(photoModal);
+                {os && fotos.length === 0 && (
+                  <p className="field-hint">
+                    {photoModal.tipo === "abertura"
+                      ? "Nenhuma foto cadastrada pelo operador para esta OS."
+                      : "Nenhuma foto cadastrada pela terceirizada para esta OS."}
+                  </p>
+                )}
 
-                if (fotos.length === 0) {
-                  return (
-                    <p className="field-hint">
-                      {photoModal.tipo === "abertura"
-                        ? "Nenhuma foto cadastrada pelo operador para esta OS."
-                        : "Nenhuma foto cadastrada pela terceirizada para esta OS."}
-                    </p>
-                  );
-                }
-
-                const foto = fotos[photoModal.currentIndex] ?? fotos[0];
-
-                return (
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      gap: "1rem",
-                    }}
-                  >
+                {os && fotos.length > 0 && fotoAtual && (
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "1rem" }}>
                     {fotos.length > 1 && (
-                      <button
-                        type="button"
-                        className="btn-secondary"
-                        onClick={goToPrevPhoto}
-                      >
+                      <button type="button" className="btn-secondary" onClick={goToPrevPhoto}>
                         ←
                       </button>
                     )}
 
-                    <div
-                      style={{
-                        maxWidth: "100%",
-                        width: "100%",
-                        textAlign: "center",
-                      }}
-                    >
+                    <div style={{ maxWidth: "100%", width: "100%", textAlign: "center" }}>
                       <img
-                        src={foto.url}
-                        alt={foto.label}
+                        src={fotoAtual.url}
+                        alt={fotoAtual.label}
                         style={{
                           width: "100%",
                           maxHeight: "70vh",
@@ -1644,83 +1740,72 @@ const ListaOrdensServico: React.FC = () => {
                         }}
                       />
                       <p className="photo-modal-timestamp">
-                        {foto.label}{" "}
+                        {fotoAtual.label}
                         {fotos.length > 1 && (
                           <>
                             {" "}
-                            · Foto {photoModal.currentIndex + 1} de{" "}
-                            {fotos.length}
+                            · Foto {photoModal.currentIndex + 1} de {fotos.length}
                           </>
                         )}
                       </p>
                     </div>
 
                     {fotos.length > 1 && (
-                      <button
-                        type="button"
-                        className="btn-secondary"
-                        onClick={goToNextPhoto}
-                      >
+                      <button type="button" className="btn-secondary" onClick={goToNextPhoto}>
                         →
                       </button>
                     )}
                   </div>
-                );
-              })()}
-            </div>
+                )}
+              </div>
 
-            <div
-              className="modal-footer"
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                gap: "0.75rem",
-                flexWrap: "wrap",
-              }}
-            >
-              <div style={{ display: "flex", gap: "0.5rem" }}>
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  onClick={closePhotoModal}
-                >
-                  Fechar
-                </button>
-                {canEditOs(photoModal.os) &&
-                  getFotosFromModalState(photoModal).length > 0 && (
-                    <button
-                      type="button"
-                      className="btn-primary btn-danger"
-                      onClick={handleDeleteCurrentPhoto}
-                    >
+              <div
+                className="modal-footer"
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  gap: "0.75rem",
+                  flexWrap: "wrap",
+                }}
+              >
+                <div style={{ display: "flex", gap: "0.5rem" }}>
+                  <button type="button" className="btn-secondary" onClick={closePhotoModal}>
+                    Fechar
+                  </button>
+
+                  {os && fotos.length > 0 && (
+                    <button type="button" className="btn-primary" onClick={handlePrintCurrentPhoto}>
+                      Imprimir
+                    </button>
+                  )}
+
+                  {os && canEditOs(os) && fotos.length > 0 && (
+                    <button type="button" className="btn-primary btn-danger" onClick={handleDeleteCurrentPhoto}>
                       Excluir foto
                     </button>
                   )}
-              </div>
-
-              {canEditOs(photoModal.os) && (
-                <div>
-                  <input
-                    ref={addPhotoInputRef}
-                    type="file"
-                    accept="image/*"
-                    multiple
-                    style={{ display: "none" }}
-                    onChange={handleAddPhotosChange}
-                  />
-                  <button
-                    type="button"
-                    className="btn-primary"
-                    onClick={triggerAddPhotos}
-                  >
-                    Adicionar fotos
-                  </button>
                 </div>
-              )}
+
+                {os && canEditOs(os) && (
+                  <div>
+                    <input
+                      ref={addPhotoInputRef}
+                      type="file"
+                      accept="image/*"
+                      multiple
+                      style={{ display: "none" }}
+                      onChange={handleAddPhotosChange}
+                    />
+                    <button type="button" className="btn-primary" onClick={triggerAddPhotos}>
+                      Adicionar fotos
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </section>
   );
 };

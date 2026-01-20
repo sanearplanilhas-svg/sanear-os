@@ -1808,19 +1808,172 @@ body {
   box-shadow: 0 0 0 2px #ecfdf5, 0 0 0 4px rgba(22, 163, 74, 0.9);
 }
 
-/* Opcional: esconder filtro e botão na impressão */
+/* ======= IMPRESSÃO PROFISSIONAL (DASHBOARD) ======= */
+
+@page {
+  size: A4;
+  margin: 12mm;
+}
+
+/* Helpers */
+.print-only {
+  display: none;
+}
+
+.screen-only {
+  display: block;
+}
+
 @media print {
-  .dashboard-toolbar,
-  .dashboard-filter-panel,
-  .dashboard-print-container {
+  /* Mostrar/ocultar por contexto */
+  .print-only {
+    display: block !important;
+  }
+
+  .screen-only {
     display: none !important;
   }
 
+  /* Remover “chrome” do app na impressão */
+  .sidebar,
+  .topbar,
+  .notif-wrapper,
+  .notif-popover,
+  .notif2-wrapper,
+  .notif2-popover {
+    display: none !important;
+  }
+
+  /* Se um modal estiver aberto, não imprime o backdrop */
+  .dashboard-modal-backdrop,
+  .modal-backdrop {
+    display: none !important;
+  }
+
+  /* Fundo branco, sem scrollbars e sem áreas recortadas */
+  html,
+  body,
+  .app-shell,
+  .app-main,
+  .page-wrapper {
+    background: #ffffff !important;
+    overflow: visible !important;
+    height: auto !important;
+    max-height: none !important;
+  }
+
+  .page-wrapper {
+    padding: 0 !important;
+  }
+
+  /* Cards e containers sem “efeitos de tela” */
+  .page-card,
   .page-card.dashboard-layout {
-    box-shadow: none;
-    border-radius: 0;
+    max-width: none !important;
+    margin: 0 !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    border: none !important;
+  }
+
+  /* Esconder ferramentas do Dashboard durante impressão */
+  .dashboard-toolbar,
+  .dashboard-filter-panel,
+  .dashboard-print-container,
+  .dashboard-tabs {
+    display: none !important;
+  }
+
+  /* Garantir cores no print (evita ficar “lavado”) */
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  /* Layout do Dashboard no papel */
+  .dashboard-layout {
+    gap: 10mm !important;
+  }
+
+  .dashboard-header-grid {
+    flex-direction: row !important;
+    align-items: flex-start !important;
+  }
+
+  /* Cabeçalho highlight: remove gradiente no papel */
+  .dashboard-header-highlight {
+    background: #ffffff !important;
+    color: #0f172a !important;
+    border: 1px solid #e5e7eb !important;
+    box-shadow: none !important;
+  }
+
+  .dashboard-header-label,
+  .dashboard-header-sub {
+    color: #334155 !important;
+  }
+
+  .dashboard-header-value {
+    font-size: 22pt !important;
+    line-height: 1.05 !important;
+  }
+
+  /* KPIs em 2 colunas (melhor em A4) */
+  .dashboard-kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 6mm !important;
+  }
+
+  .dashboard-kpi-value {
+    font-size: 22pt !important;
+    line-height: 1.1 !important;
+  }
+
+  /* Gráficos: forçar fluxo em coluna (evita corte no meio do card) */
+  .dashboard-charts-grid {
+    display: block !important;
+  }
+
+  .dashboard-chart-card {
+    margin-bottom: 10mm !important;
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+
+  /* Evita quebra de página em blocos principais */
+  .dashboard-print-header,
+  .dashboard-header-highlight,
+  .dashboard-kpi-card,
+  .dashboard-section {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
   }
 }
+
+
+/* ======= CABEÇALHO DO RELATÓRIO (PRINT) ======= */
+
+.dashboard-print-header {
+  padding-bottom: 0.8rem;
+  margin-bottom: 0.8rem;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.dashboard-print-title {
+  font-size: 1.25rem;
+  font-weight: 800;
+  color: #0f172a;
+}
+
+.dashboard-print-meta {
+  margin-top: 0.25rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  font-size: 0.9rem;
+  color: #4b5563;
+}
+
 
 /* Deixa o card principal abaixo do modal */
 .page-card.dashboard-layout {

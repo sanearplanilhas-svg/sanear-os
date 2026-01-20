@@ -14,6 +14,7 @@ import {
   PieChart,
   Pie,
   Cell,
+  LabelList,
 } from "recharts";
 
 type Origem = "buraco" | "asfalto";
@@ -480,6 +481,23 @@ const Dashboard: React.FC = () => {
 
   return (
     <section className="page-card dashboard-layout">
+
+      {/* Cabeçalho do relatório (somente impressão) */}
+      <div className="dashboard-print-header print-only">
+        <div className="dashboard-print-title">Relatório Operacional — SANEAR</div>
+        <div className="dashboard-print-meta">
+          <span>
+            <strong>Seção:</strong> {headerTitle}
+          </span>
+          <span>
+            <strong>Período:</strong> {filterRangeLabel || "Hoje"}
+          </span>
+          <span>
+            <strong>Gerado em:</strong> {new Date().toLocaleString("pt-BR")}
+          </span>
+        </div>
+      </div>
+
       <header className="page-header dashboard-header-grid">
         <div>
           <h2>{headerTitle}</h2>
@@ -818,10 +836,10 @@ const Dashboard: React.FC = () => {
                 <ResponsiveContainer width="100%" height={260}>
                   <BarChart
                     data={produtividade7dias}
-                    margin={{ top: 10, right: 16, left: 0, bottom: 0 }}
+                    margin={{ top: 10, right: 16, left: 0, bottom: 22 }}
                   >
                     <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                    <XAxis dataKey="dia" tick={{ fontSize: 11 }} />
+                    <XAxis dataKey="dia" tick={{ fontSize: 11 }} interval={0} tickMargin={8} />
                     <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
                     <Tooltip
                       contentStyle={{
@@ -831,7 +849,9 @@ const Dashboard: React.FC = () => {
                         fontSize: 12,
                       }}
                     />
-                    <Bar dataKey="concluidas" name="Concluídas" fill="url(#prodGradient)" />
+                    <Bar dataKey="concluidas" name="Concluídas" fill="url(#prodGradient)" barSize={34} minPointSize={2}>
+                      <LabelList dataKey="concluidas" position="top" fontSize={11} />
+                    </Bar>
                     <defs>
                       <linearGradient id="prodGradient" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="0%" stopColor="#22c55e" />
@@ -858,10 +878,10 @@ const Dashboard: React.FC = () => {
                 <ResponsiveContainer width="100%" height={260}>
                   <BarChart
                     data={produtividade7dias}
-                    margin={{ top: 10, right: 16, left: 0, bottom: 0 }}
+                    margin={{ top: 10, right: 16, left: 0, bottom: 22 }}
                   >
                     <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                    <XAxis dataKey="dia" tick={{ fontSize: 11 }} />
+                    <XAxis dataKey="dia" tick={{ fontSize: 11 }} interval={0} tickMargin={8} />
                     <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
                     <Tooltip
                       contentStyle={{
@@ -871,7 +891,9 @@ const Dashboard: React.FC = () => {
                         fontSize: 12,
                       }}
                     />
-                    <Bar dataKey="concluidas" name="Concluídas" fill="url(#prodGradient)" />
+                    <Bar dataKey="concluidas" name="Concluídas" fill="url(#prodGradient)" barSize={34} minPointSize={2}>
+                      <LabelList dataKey="concluidas" position="top" fontSize={11} />
+                    </Bar>
                     <defs>
                       <linearGradient id="prodGradient" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="0%" stopColor="#22c55e" />

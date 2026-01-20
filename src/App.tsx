@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import type { User } from "firebase/auth";
 import {
@@ -139,6 +139,10 @@ const App: React.FC = () => {
   const [concludedBuraco, setConcludedBuraco] = useState<NotifItem[]>([]);
   const [concludedAsfalto, setConcludedAsfalto] = useState<NotifItem[]>([]);
 
+  // Marca d’água baseada em timestamps do Firestore (mitiga drift de relógio do cliente)
+  const [serverNowMs, setServerNowMs] = useState<number>(Date.now());
+  const serverNowRef = useRef<number>(Date.now());
+
   const notifications = useMemo(() => {
     const all = [
       ...createdBuraco,
@@ -155,6 +159,97 @@ const App: React.FC = () => {
   }, [createdBuraco, createdAsfalto, concludedBuraco, concludedAsfalto]);
 
   const unreadCount = notifications.length;
+
+  // Mantém uma aproximação do "agora" do servidor a partir dos últimos registros gravados.
+  // Isso evita que um relógio local adiantado faça você "perder" notificações (ex.: você cria uma OS e não aparece pra você).
+  useEffect(() => {
+    if (!user) return;
+
+    const zeroTs = Timestamp.fromMillis(0);
+
+    const update = (ms: number | null | undefined) => {
+      if (!ms || !Number.isFinite(ms)) return;
+      if (ms > serverNowRef.current) {
+        serverNowRef.current = ms;
+        setServerNowMs(ms);
+      }
+    };
+
+    const qLatestCreatedBuraco = query(
+      collection(db, "ordens_servico"),
+      where("createdAt", ">", zeroTs),
+      orderBy("createdAt", "desc"),
+      limit(1)
+    );
+
+    const u1 = onSnapshot(
+      qLatestCreatedBuraco,
+      (snap) => {
+        const d = snap.docs[0];
+        const ts = (d?.data() as any)?.createdAt as Timestamp | null | undefined;
+        update(ts?.toMillis?.());
+      },
+      (err) => console.error("ServerNow created ordens_servico:", err)
+    );
+
+    const qLatestCreatedAsfalto = query(
+      collection(db, "ordensServico"),
+      where("createdAt", ">", zeroTs),
+      orderBy("createdAt", "desc"),
+      limit(1)
+    );
+
+    const u2 = onSnapshot(
+      qLatestCreatedAsfalto,
+      (snap) => {
+        const d = snap.docs[0];
+        const ts = (d?.data() as any)?.createdAt as Timestamp | null | undefined;
+        update(ts?.toMillis?.());
+      },
+      (err) => console.error("ServerNow created ordensServico:", err)
+    );
+
+    const qLatestExecBuraco = query(
+      collection(db, "ordens_servico"),
+      where("dataExecucao", ">", zeroTs),
+      orderBy("dataExecucao", "desc"),
+      limit(1)
+    );
+
+    const u3 = onSnapshot(
+      qLatestExecBuraco,
+      (snap) => {
+        const d = snap.docs[0];
+        const ts = (d?.data() as any)?.dataExecucao as Timestamp | null | undefined;
+        update(ts?.toMillis?.());
+      },
+      (err) => console.error("ServerNow exec ordens_servico:", err)
+    );
+
+    const qLatestExecAsfalto = query(
+      collection(db, "ordensServico"),
+      where("dataExecucao", ">", zeroTs),
+      orderBy("dataExecucao", "desc"),
+      limit(1)
+    );
+
+    const u4 = onSnapshot(
+      qLatestExecAsfalto,
+      (snap) => {
+        const d = snap.docs[0];
+        const ts = (d?.data() as any)?.dataExecucao as Timestamp | null | undefined;
+        update(ts?.toMillis?.());
+      },
+      (err) => console.error("ServerNow exec ordensServico:", err)
+    );
+
+    return () => {
+      u1();
+      u2();
+      u3();
+      u4();
+    };
+  }, [user]);
 
   // Observa o estado de autenticação do Firebase
   useEffect(() => {
@@ -218,11 +313,19 @@ const App: React.FC = () => {
 
     const seenKey = `sanear-lastSeenOS-${user.uid}`;
     const raw = localStorage.getItem(seenKey);
-    const lastSeenMs = raw ? Number(raw) : 0;
+    let lastSeenMs = raw ? Number(raw) : 0;
+
+    // Se o relógio do PC estiver adiantado (ou o valor salvo estiver "no futuro"), você pode perder notificações.
+    // Aqui nós corrigimos automaticamente usando a melhor aproximação de tempo do servidor que tivermos.
+    const approxServerNow = serverNowRef.current || serverNowMs || 0;
+    if (approxServerNow && lastSeenMs > approxServerNow + 60_000) {
+      lastSeenMs = approxServerNow;
+      localStorage.setItem(seenKey, String(lastSeenMs));
+    }
 
     // Primeira vez no navegador: não mostra histórico como "novo"
     if (!lastSeenMs || Number.isNaN(lastSeenMs)) {
-      localStorage.setItem(seenKey, String(Date.now()));
+      localStorage.setItem(seenKey, String(serverNowRef.current || serverNowMs || Date.now()));
       setCreatedBuraco([]);
       setCreatedAsfalto([]);
       setConcludedBuraco([]);
@@ -350,12 +453,17 @@ const App: React.FC = () => {
       u3();
       u4();
     };
-  }, [user]);
+  }, [user, serverNowMs]);
 
   function markAllAsSeen() {
     if (!user) return;
     const key = `sanear-lastSeenOS-${user.uid}`;
-    localStorage.setItem(key, String(Date.now()));
+
+    const maxFromFeed = notifications.reduce((acc, n) => Math.max(acc, n.tsMillis || 0), 0);
+    const approxServerNow = serverNowRef.current || serverNowMs || Date.now();
+    const watermark = Math.max(maxFromFeed, approxServerNow, 0);
+
+    localStorage.setItem(key, String(watermark));
 
     setCreatedBuraco([]);
     setCreatedAsfalto([]);
