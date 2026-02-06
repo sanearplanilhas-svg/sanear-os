@@ -99,6 +99,32 @@ function getNumeroOs(data: any, fallbackId: string) {
     fallbackId
   );
 }
+function getMenuMeta(menu: MenuKey): { title: string; section: string } {
+  switch (menu) {
+    case "dashboard":
+      return { title: "Dashboard", section: "Visão geral" };
+    case "buraco":
+      return { title: "Calçamento", section: "Operacional" };
+    case "asfalto":
+      return { title: "Asfalto", section: "Operacional" };
+    case "hidrojato":
+      return { title: "Caminhão Hidrojato", section: "Operacional" };
+    case "esgoto_entupido":
+      return { title: "Esgoto Entupido", section: "Operacional" };
+    case "esgoto_retornando":
+      return { title: "Esgoto Retornando", section: "Operacional" };
+    case "listaOS":
+      return { title: "Lista de Ordens de Serviço", section: "Operacional" };
+    case "terceirizada":
+      return { title: "Visão da Terceirizada", section: "Terceirizada" };
+    case "usuario":
+      return { title: "Usuário", section: "Configurações" };
+    default:
+      return { title: "Sanear Operacional", section: "Setor Operacional" };
+  }
+}
+
+
 
 const App: React.FC = () => {
   // ---- AUTH ----
@@ -133,6 +159,7 @@ const App: React.FC = () => {
 
   // ==== NOTIFICAÇÕES (feed) ====
   const [notifOpen, setNotifOpen] = useState(false);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
 
   const [createdBuraco, setCreatedBuraco] = useState<NotifItem[]>([]);
   const [createdAsfalto, setCreatedAsfalto] = useState<NotifItem[]>([]);
@@ -159,6 +186,16 @@ const App: React.FC = () => {
   }, [createdBuraco, createdAsfalto, concludedBuraco, concludedAsfalto]);
 
   const unreadCount = notifications.length;
+
+  const pageMeta = getMenuMeta(activeMenu);
+
+  const userDisplayName =
+    user?.displayName ||
+    (user?.email ? user.email.split("@")[0] : "Usuário") ||
+    "Usuário";
+
+  const userInitial = (userDisplayName || "U").trim().charAt(0).toUpperCase();
+
 
   // Mantém uma aproximação do "agora" do servidor a partir dos últimos registros gravados.
   // Isso evita que um relógio local adiantado faça você "perder" notificações (ex.: você cria uma OS e não aparece pra você).
@@ -272,7 +309,21 @@ const App: React.FC = () => {
     }
   }, [activeMenu]);
 
-  // Carregar e-mail salvo (lembrar e-mail)
+  
+  // Navegação por evento (para páginas internas mudarem o menu sem props)
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const e = event as CustomEvent<{ menu?: MenuKey }>;
+      const next = e.detail?.menu;
+      if (next) setActiveMenu(next);
+    };
+
+    window.addEventListener("sanear:navigate", handler as EventListener);
+    return () => {
+      window.removeEventListener("sanear:navigate", handler as EventListener);
+    };
+  }, []);
+// Carregar e-mail salvo (lembrar e-mail)
   useEffect(() => {
     const storedEmail = localStorage.getItem("sanear-email");
     if (storedEmail) {
@@ -299,13 +350,17 @@ const App: React.FC = () => {
     }
   }, []);
 
-  // Fecha o popover ao clicar fora
-  useEffect(() => {
-    if (!notifOpen) return;
-    const handler = () => setNotifOpen(false);
-    window.addEventListener("click", handler);
-    return () => window.removeEventListener("click", handler);
-  }, [notifOpen]);
+  // Fecha popovers ao clicar fora
+useEffect(() => {
+  if (!notifOpen && !userMenuOpen) return;
+  const handler = () => {
+    setNotifOpen(false);
+      setUserMenuOpen(false);
+    setUserMenuOpen(false);
+  };
+  window.addEventListener("click", handler);
+  return () => window.removeEventListener("click", handler);
+}, [notifOpen, userMenuOpen]);
 
   // Listener de novas OS (criadas) e OS concluídas (dataExecucao)
   useEffect(() => {
@@ -856,99 +911,145 @@ const App: React.FC = () => {
 
       <main className="app-main">
         <header className="topbar">
-          <div className="topbar-title">
-            <h2>
-              {activeMenu === "dashboard"
-                ? "Dashboard"
-                : activeMenu === "buraco"
-                ? "Calçamento"
-                : activeMenu === "asfalto"
-                ? "Asfalto"
-                : activeMenu === "hidrojato"
-                ? "Caminhão Hidrojato"
-                : activeMenu === "esgoto_entupido"
-                ? "Esgoto Entupido"
-                : activeMenu === "esgoto_retornando"
-                ? "Esgoto Retornando"
-                : activeMenu === "terceirizada"
-                ? "Visão da Terceirizada"
-                : activeMenu === "usuario"
-                ? "Usuário"
-                : activeMenu === "listaOS"
-                ? "Lista de Ordens de Serviço"
-                : "Sanear Operacional"}
-            </h2>
-            <span>Sanear • Setor Operacional</span>
-          </div>
+  <div className="topbar-inner">
+    <div className="topbar-left">
+      <div
+        className="topbar-crumbs"
+        title={`Sanear / Setor Operacional / ${pageMeta.section}`}
+      >
+        <span className="topbar-crumb">Sanear</span>
+        <span className="topbar-sep">/</span>
+        <span className="topbar-crumb">Setor Operacional</span>
+        <span className="topbar-sep">/</span>
+        <span className="topbar-crumb">{pageMeta.section}</span>
+      </div>
 
-          <div className="topbar-user">
-            <div>
-              <div className="topbar-user-name">{user?.displayName || "Usuário"}</div>
-              <div style={{ fontSize: "0.75rem", color: "#9ca3af" }}>
-                {user?.email}
+      <div className="topbar-page-title" title={pageMeta.title}>
+        {pageMeta.title}
+      </div>
+    </div>
+
+    <div className="topbar-actions">
+      {/* NOTIFICAÇÕES */}
+      <div className="notif2-wrapper" onClick={(e) => e.stopPropagation()}>
+        <button
+          type="button"
+          className="notif2-btn"
+          onClick={() => {
+            setUserMenuOpen(false);
+            setNotifOpen((p) => !p);
+          }}
+          aria-label="Notificações"
+          title="Notificações"
+        >
+          🔔
+          {unreadCount > 0 && (
+            <span className="notif2-badge">
+              {unreadCount > 99 ? "99+" : unreadCount}
+            </span>
+          )}
+        </button>
+
+        {notifOpen && (
+          <div className="notif2-popover">
+            <div className="notif2-head">
+              <div>
+                <div className="notif2-title">Notificações</div>
+                <div className="notif2-sub">
+                  Novas OS criadas e OS concluídas desde a última visualização.
+                </div>
+              </div>
+
+              <button type="button" className="notif2-clear" onClick={markAllAsSeen}>
+                Marcar tudo como visto
+              </button>
+            </div>
+
+            {notifications.length === 0 ? (
+              <div className="notif2-empty">Nenhuma notificação nova.</div>
+            ) : (
+              <div className="notif2-list">
+                {notifications.map((n) => (
+                  <button
+                    key={n.id}
+                    type="button"
+                    className="notif2-item"
+                    onClick={() => openNotification(n)}
+                  >
+                    <div className="notif2-item-title">{n.message}</div>
+                    <div className="notif2-item-meta">{formatNotifTime(n.tsMillis)}</div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* USUÁRIO */}
+      <div className="user2-wrapper" onClick={(e) => e.stopPropagation()}>
+        <button
+          type="button"
+          className="user2-btn"
+          onClick={() => {
+            setNotifOpen(false);
+            setUserMenuOpen((p) => !p);
+          }}
+          aria-label="Menu do usuário"
+          title="Menu do usuário"
+        >
+          <span className="user2-avatar" aria-hidden="true">
+            {userInitial}
+          </span>
+
+          <span className="user2-meta">
+            <span className="user2-name" title={userDisplayName}>
+              {userDisplayName}
+            </span>
+            <span className="user2-role">{simulatedRole.toUpperCase()}</span>
+          </span>
+
+          <span className="user2-caret" aria-hidden="true">
+            ▾
+          </span>
+        </button>
+
+        {userMenuOpen && (
+          <div className="user2-popover">
+            <div className="user2-popover-head">
+              <div className="user2-popover-title">{userDisplayName}</div>
+              {user?.email && <div className="user2-popover-email">{user.email}</div>}
+              <div className="user2-popover-pill">
+                Perfil: {simulatedRole.toUpperCase()}
               </div>
             </div>
 
-            <span className="topbar-user-role">Perfil: {simulatedRole.toUpperCase()}</span>
-
-            {/* NOTIFICAÇÕES */}
-            <div className="notif2-wrapper" onClick={(e) => e.stopPropagation()}>
+            <div className="user2-popover-actions">
               <button
                 type="button"
-                className="notif2-btn"
-                onClick={() => setNotifOpen((p) => !p)}
-                aria-label="Notificações"
-                title="Notificações"
+                className="user2-item"
+                onClick={() => {
+                  setUserMenuOpen(false);
+                  setActiveMenu("usuario");
+                }}
               >
-                🔔
-                {unreadCount > 0 && (
-                  <span className="notif2-badge">{unreadCount > 99 ? "99+" : unreadCount}</span>
-                )}
+                👤 Perfil &amp; Acesso
               </button>
 
-              {notifOpen && (
-                <div className="notif2-popover">
-                  <div className="notif2-head">
-                    <div>
-                      <div className="notif2-title">Notificações</div>
-                      <div className="notif2-sub">
-                        Novas OS criadas e OS concluídas desde a última visualização.
-                      </div>
-                    </div>
-
-                    <button type="button" className="notif2-clear" onClick={markAllAsSeen}>
-                      Marcar tudo como visto
-                    </button>
-                  </div>
-
-                  {notifications.length === 0 ? (
-                    <div className="notif2-empty">Nenhuma notificação nova.</div>
-                  ) : (
-                    <div className="notif2-list">
-                      {notifications.map((n) => (
-                        <button
-                          key={n.id}
-                          type="button"
-                          className="notif2-item"
-                          onClick={() => openNotification(n)}
-                        >
-                          <div className="notif2-item-title">{n.message}</div>
-                          <div className="notif2-item-meta">
-                            {formatNotifTime(n.tsMillis)}
-                          </div>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
+              <button
+                type="button"
+                className="user2-item user2-item-danger"
+                onClick={handleLogout}
+              >
+                🚪 Sair
+              </button>
             </div>
-
-            <button type="button" className="btn-secondary" onClick={handleLogout}>
-              Sair
-            </button>
           </div>
-        </header>
+        )}
+      </div>
+    </div>
+  </div>
+</header>
 
         <div className="page-wrapper">{renderContent()}</div>
       </main>

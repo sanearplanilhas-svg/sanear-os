@@ -13,6 +13,13 @@ import {
 import type { Timestamp } from "firebase/firestore";
 import { db } from "../lib/firebaseClient";
 import { supabase } from "../lib/supabaseClient";
+import {
+  upsertSanearPause,
+  closeSanearPause,
+  hasOpenSanearPause,
+  SLA_HORAS_PADRAO,
+  MS_POR_HORA,
+} from "../lib/sla";
 
 // bucket do Supabase onde as OS estão sendo gravadas
 const STORAGE_BUCKET = "os-arquivos";
@@ -38,6 +45,11 @@ type FirestoreOS = {
   createdAt?: Timestamp | null;
   createdByEmail?: string | null;
   dataExecucao?: Timestamp | null;
+
+  // SLA (72h) e pausa SANEAR
+  slaHoras?: number | null;
+  slaPausas?: any[] | null;
+  statusAntesAguardandoSanear?: string | null;
 
   // PDF da papeleta (URL pública Supabase / Storage) – mantido por compatibilidade
   ordemServicoPdfBase64?: string | null;
@@ -98,6 +110,45 @@ function formatCreatedAt(createdAt?: Timestamp | null): string {
   } catch {
     return "-";
   }
+}
+
+
+// ===== SLA: cálculo de SLA ÚTIL (padrão 72h) (sábado/domingo não contam) =====
+function businessMsBetween(start: Date, end: Date): number {
+  if (end.getTime() <= start.getTime()) return 0;
+
+  let total = 0;
+  let cursor = new Date(start.getTime());
+
+  while (cursor.getTime() < end.getTime()) {
+    const day = cursor.getDay(); // 0=dom, 6=sáb
+    const isWeekend = day === 0 || day === 6;
+
+    const nextMidnight = new Date(cursor);
+    nextMidnight.setHours(24, 0, 0, 0);
+
+    const segmentEndMs = Math.min(end.getTime(), nextMidnight.getTime());
+    const segmentMs = Math.max(0, segmentEndMs - cursor.getTime());
+
+    if (!isWeekend) total += segmentMs;
+
+    cursor = new Date(segmentEndMs);
+  }
+
+  return total;
+}
+
+function formatBusinessDuration(ms: number): string {
+  const totalMinutes = Math.max(0, Math.floor(ms / 60000));
+  const totalHours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+
+  const days = Math.floor(totalHours / 24);
+  const hours = totalHours % 24;
+
+  if (days > 0) return `${days}d ${hours}h úteis`;
+  if (totalHours > 0) return `${totalHours}h ${minutes}m úteis`;
+  return `${minutes}m úteis`;
 }
 
 const generateLocalId = () =>
@@ -290,6 +341,17 @@ const TerceirizadaVisao: React.FC = () => {
   const [busca, setBusca] = useState("");
   const [loading, setLoading] = useState(true);
 
+  // ===== SLA (72h úteis) =====
+  const [slaOpen, setSlaOpen] = useState(false);
+
+  // "tick" para recalcular o SLA periodicamente (sem reabrir listeners)
+  const [nowTick, setNowTick] = useState<number>(() => Date.now());
+
+  useEffect(() => {
+    const t = window.setInterval(() => setNowTick(Date.now()), 60_000);
+    return () => window.clearInterval(t);
+  }, []);
+
   // Abas de status: Abertas / Concluídas / Todas
   const [statusTab, setStatusTab] = useState<"ALL" | "OPEN" | "DONE">("OPEN");
 
@@ -314,6 +376,11 @@ const TerceirizadaVisao: React.FC = () => {
     title: string;
     message: string;
   } | null>(null);
+
+  // ===== Aguardando SANEAR (SLA pausado) =====
+  const [aguardandoSanearOpen, setAguardandoSanearOpen] = useState(false);
+  const [aguardandoMotivo, setAguardandoMotivo] = useState("SERVICO_PREVIO");
+  const [aguardandoDescricao, setAguardandoDescricao] = useState("");
 
   // ======= CARREGAR OS DE BURACO + ASFALTO =======
   useEffect(() => {
@@ -467,6 +534,70 @@ const TerceirizadaVisao: React.FC = () => {
     return [...ordensBuraco, ...ordensAsfalto];
   }, [ordensBuraco, ordensAsfalto]);
 
+  // ===== SLA: OS em aberto acima de 72h úteis (seg–sex) =====
+  const slaSnapshot = useMemo(() => {
+    const now = new Date(nowTick);
+
+    const abertas = ordens.filter(
+      (os) => !isDoneStatus(os.status) && !!os.createdAt
+    );
+
+    const toJsDate = (v: any): Date | null => {
+      if (!v) return null;
+      if (v instanceof Date) return v;
+      if (typeof v?.toDate === "function") return v.toDate() as Date;
+      return null;
+    };
+
+    const list = abertas
+      .map((os) => {
+        const created = os.createdAt ? os.createdAt.toDate() : null;
+
+        const baseMs = created ? businessMsBetween(created, now) : 0;
+
+        // Desconta pausas SANEAR (SLA pausado)
+        const pausas = Array.isArray((os as any).slaPausas)
+          ? ((os as any).slaPausas as any[])
+          : [];
+
+        let pausadoMs = 0;
+
+        for (const p of pausas) {
+          if (p?.tipo !== "SANEAR") continue;
+          const ini = toJsDate(p?.inicioEm);
+          if (!ini) continue;
+          const fim = toJsDate(p?.fimEm) ?? now;
+          pausadoMs += businessMsBetween(ini, fim);
+        }
+
+        const ageMs = Math.max(0, baseMs - pausadoMs);
+
+        const slaHoras =
+          typeof (os as any).slaHoras === "number" && (os as any).slaHoras > 0
+            ? ((os as any).slaHoras as number)
+            : SLA_HORAS_PADRAO;
+
+        const slaMs = slaHoras * MS_POR_HORA;
+
+        return { os, ageMs, slaHoras, slaMs };
+      })
+      .filter((x) => x.ageMs > 0);
+
+    const overdue = list
+      .filter((x) => x.ageMs >= x.slaMs)
+      .sort((a, b) => b.ageMs - a.ageMs);
+
+    const nearDue = list
+      .filter((x) => x.ageMs >= x.slaMs * 0.75 && x.ageMs < x.slaMs)
+      .sort((a, b) => b.ageMs - a.ageMs);
+
+    return {
+      overdue,
+      nearDue,
+      totalOpen: abertas.length,
+    };
+  }, [ordens, nowTick]);
+
   // 1) Filtra por status (aba)
   const porStatus = useMemo(() => {
     return ordens.filter((os) => {
@@ -553,6 +684,40 @@ const TerceirizadaVisao: React.FC = () => {
     setShowPhotoUploader(false);
   }
 
+  function handleOpenSlaDrawer() {
+    if (slaSnapshot.overdue.length === 0) {
+      setInfoModal({
+        title: "SLA em dia",
+        message: "Nenhuma OS em aberto ultrapassou 72h úteis (descontando pausas do SLA; sábado e domingo não contam).",
+      });
+      return;
+    }
+    setSlaOpen(true);
+  }
+
+  function navigateToListaOsHighlight(os: FirestoreOS) {
+    try {
+      const payload = {
+        osId: os.id,
+        origem: os.origem,
+      };
+      window.sessionStorage.setItem(
+        "sanear-listaos-highlight",
+        JSON.stringify(payload)
+      );
+      window.dispatchEvent(
+        new CustomEvent("sanear:navigate", { detail: { menu: "listaOS" } })
+      );
+    } catch {
+      // se algo falhar, ao menos navega para a lista
+      window.dispatchEvent(
+        new CustomEvent("sanear:navigate", { detail: { menu: "listaOS" } })
+      );
+    } finally {
+      setSlaOpen(false);
+    }
+  }
+
   function handleModalFilesChange(e: ChangeEvent<HTMLInputElement>) {
     if (!modalOs) return;
 
@@ -613,8 +778,123 @@ const TerceirizadaVisao: React.FC = () => {
     });
   }
 
-  async function handleServicoExecutado() {
+  function normalizeStatus(value: string | null | undefined): string {
+  return String(value ?? "").trim().toUpperCase();
+}
+
+
+async function handleMarcarAguardandoSanear() {
+  if (!modalOs) return;
+
+  const descricao = aguardandoDescricao.trim();
+  if (descricao.length < 3) {
+    setInfoModal({
+      title: "Descrição obrigatória",
+      message: "Informe uma descrição curta do motivo (mín. 3 caracteres).",
+    });
+    return;
+  }
+
+  try {
+    setIsUpdatingStatus(true);
+
+    const collectionName =
+      modalOs.origem === "asfalto" ? "ordensServico" : "ordens_servico";
+
+    const statusAtual = normalizeStatus(modalOs.status);
+    const statusAntes =
+      modalOs.statusAntesAguardandoSanear ??
+      (statusAtual && statusAtual !== "AGUARDANDO_SANEAR" ? statusAtual : "ABERTA");
+
+    const pausasAtualizadas = upsertSanearPause(modalOs.slaPausas, {
+      motivo: aguardandoMotivo,
+      descricao,
+      inicioEm: serverTimestamp(),
+    });
+
+    await updateDoc(doc(db, collectionName, modalOs.id), {
+      status: "AGUARDANDO_SANEAR",
+      statusAntesAguardandoSanear: statusAntes,
+      slaPausas: pausasAtualizadas,
+      updatedAt: serverTimestamp(),
+    });
+
+    setModalOs((prev) =>
+      prev
+        ? {
+            ...prev,
+            status: "AGUARDANDO_SANEAR",
+            statusAntesAguardandoSanear: statusAntes,
+            slaPausas: pausasAtualizadas,
+          }
+        : prev
+    );
+
+    setAguardandoSanearOpen(false);
+    setAguardandoDescricao("");
+  } catch (e) {
+    console.error(e);
+    setInfoModal({
+      title: "Erro",
+      message: "Não foi possível marcar como Aguardando SANEAR. Tente novamente.",
+    });
+  } finally {
+    setIsUpdatingStatus(false);
+  }
+}
+
+async function handleRetomarSanear() {
+  if (!modalOs) return;
+
+  try {
+    setIsUpdatingStatus(true);
+
+    const collectionName =
+      modalOs.origem === "asfalto" ? "ordensServico" : "ordens_servico";
+
+    const pausasFechadas = closeSanearPause(modalOs.slaPausas, serverTimestamp());
+    const novoStatus = modalOs.statusAntesAguardandoSanear || "ABERTA";
+
+    await updateDoc(doc(db, collectionName, modalOs.id), {
+      status: novoStatus,
+      statusAntesAguardandoSanear: null,
+      slaPausas: pausasFechadas,
+      updatedAt: serverTimestamp(),
+    });
+
+    setModalOs((prev) =>
+      prev
+        ? {
+            ...prev,
+            status: novoStatus,
+            statusAntesAguardandoSanear: null,
+            slaPausas: pausasFechadas,
+          }
+        : prev
+    );
+  } catch (e) {
+    console.error(e);
+    setInfoModal({
+      title: "Erro",
+      message: "Não foi possível retomar a OS. Tente novamente.",
+    });
+  } finally {
+    setIsUpdatingStatus(false);
+  }
+}
+
+async function handleServicoExecutado() {
     if (!modalOs) return;
+
+    const st = normalizeStatus(modalOs.status);
+    if (st === "AGUARDANDO_SANEAR" || hasOpenSanearPause(modalOs.slaPausas)) {
+      setInfoModal({
+        title: "Aguardando SANEAR",
+        message:
+          "Esta OS está aguardando uma ação da SANEAR (SLA pausado). Clique em 'SANEAR liberou (retomar)' antes de marcar como concluída.",
+      });
+      return;
+    }
 
     // exige pelo menos uma foto
     if (currentPhotos.length === 0) {
@@ -826,6 +1106,45 @@ const TerceirizadaVisao: React.FC = () => {
             Atualizado em tempo real
           </span>
         </div>
+
+
+        <div
+          className={`os-kpi-card os-kpi-card-sla ${
+            slaSnapshot.overdue.length > 0 ? "is-danger" : "is-ok"
+          }`}
+          role="button"
+          tabIndex={0}
+          onClick={handleOpenSlaDrawer}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              handleOpenSlaDrawer();
+            }
+          }}
+          title="OS em aberto acima de 72h úteis (sábado e domingo não contam)"
+        >
+          <div>
+            <div className="os-kpi-label">
+              Alerta SLA (72h úteis)
+              {slaSnapshot.nearDue.length > 0 && (
+                <span className="os-kpi-subtle">
+                  {" "}
+                  • {slaSnapshot.nearDue.length} perto do limite
+                </span>
+              )}
+            </div>
+            <div className="os-kpi-value">{slaSnapshot.overdue.length}</div>
+          </div>
+          <span
+            className={`os-kpi-pill ${
+              slaSnapshot.overdue.length > 0
+                ? "os-kpi-pill-danger"
+                : "os-kpi-pill-success"
+            }`}
+          >
+            {slaSnapshot.overdue.length > 0 ? "Atrasadas" : "OK"}
+          </span>
+        </div>
       </div>
 
       {/* FILTROS + BUSCA */}
@@ -997,6 +1316,160 @@ const TerceirizadaVisao: React.FC = () => {
           );
         })}
       </div>
+
+
+      {/* DRAWER – Alertas de SLA (72h úteis) */}
+      {slaOpen && (
+        <div
+          className="modal-backdrop sla-backdrop"
+          onClick={() => setSlaOpen(false)}
+        >
+          <div className="sla-drawer" onClick={(e) => e.stopPropagation()}>
+            <div className="sla-drawer-header">
+              <div>
+                <h3 className="sla-title">Alertas de SLA</h3>
+                <p className="sla-subtitle">
+                  OS em aberto com <strong>mais de 72h úteis</strong> desde a
+                  criação (descontando pausas do SLA). <em>Sábado e domingo não contam.</em>
+                </p>
+              </div>
+
+              <button
+                type="button"
+                className="modal-close"
+                onClick={() => setSlaOpen(false)}
+                aria-label="Fechar"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="sla-drawer-body">
+              <div className="sla-metrics">
+                <div className="sla-metric">
+                  <div className="sla-metric-label">Atrasadas</div>
+                  <div className="sla-metric-value">{slaSnapshot.overdue.length}</div>
+                </div>
+                <div className="sla-metric">
+                  <div className="sla-metric-label">Perto do limite</div>
+                  <div className="sla-metric-value">{slaSnapshot.nearDue.length}</div>
+                </div>
+                <div className="sla-metric">
+                  <div className="sla-metric-label">OS em aberto</div>
+                  <div className="sla-metric-value">{slaSnapshot.totalOpen}</div>
+                </div>
+              </div>
+
+              <div className="sla-section">
+                <div className="sla-section-title">
+                  ⚠ Atrasadas (72h úteis+)
+                </div>
+
+                {slaSnapshot.overdue.length === 0 ? (
+                  <div className="sla-empty">
+                    Nenhuma OS atrasada no momento.
+                  </div>
+                ) : (
+                  <div className="sla-list">
+                    {slaSnapshot.overdue.map(({ os, ageMs }) => {
+                      const ident =
+                        os.ordemServico || os.protocolo || os.id;
+
+                      const address =
+                        [os.rua, os.numero ? "nº " + os.numero : "", os.bairro ? " – " + os.bairro : ""]
+                          .filter(Boolean)
+                          .join(" ") || "Endereço não informado";
+
+                      return (
+                        <button
+                          key={`${os.origem}:${os.id}`}
+                          type="button"
+                          className="sla-item"
+                          onClick={() => navigateToListaOsHighlight(os)}
+                        >
+                          <div className="sla-item-main">
+                            <div className="sla-item-ident">{ident}</div>
+                            <div className="sla-item-sub">
+                              {address} • criado em {formatCreatedAt(os.createdAt)}
+                            </div>
+                          </div>
+                          <div className="sla-item-age">
+                            {formatBusinessDuration(ageMs)}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {slaSnapshot.nearDue.length > 0 && (
+                <div className="sla-section">
+                  <div className="sla-section-title">
+                    ⏳ Perto do limite (54–72h úteis)
+                  </div>
+
+                  <div className="sla-list">
+                    {slaSnapshot.nearDue.map(({ os, ageMs }) => {
+                      const ident =
+                        os.ordemServico || os.protocolo || os.id;
+
+                      const address =
+                        [os.rua, os.numero ? "nº " + os.numero : "", os.bairro ? " – " + os.bairro : ""]
+                          .filter(Boolean)
+                          .join(" ") || "Endereço não informado";
+
+                      return (
+                        <button
+                          key={`${os.origem}:${os.id}`}
+                          type="button"
+                          className="sla-item sla-item-soon"
+                          onClick={() => navigateToListaOsHighlight(os)}
+                        >
+                          <div className="sla-item-main">
+                            <div className="sla-item-ident">{ident}</div>
+                            <div className="sla-item-sub">
+                              {address} • criado em {formatCreatedAt(os.createdAt)}
+                            </div>
+                          </div>
+                          <div className="sla-item-age">
+                            {formatBusinessDuration(ageMs)}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="sla-drawer-footer">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setSlaOpen(false)}
+              >
+                Fechar
+              </button>
+
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => {
+                  window.dispatchEvent(
+                    new CustomEvent("sanear:navigate", {
+                      detail: { menu: "listaOS" },
+                    })
+                  );
+                  setSlaOpen(false);
+                }}
+              >
+                Abrir Lista de OS
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* MODAL DE DETALHES DA OS */}
       {modalOs && (
@@ -1184,6 +1657,26 @@ const TerceirizadaVisao: React.FC = () => {
               >
                 Imprimir
               </button>
+              {normalizeStatus(modalOs.status) === "AGUARDANDO_SANEAR" ? (
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={handleRetomarSanear}
+                  disabled={isUpdatingStatus}
+                >
+                  {isUpdatingStatus ? "Atualizando..." : "SANEAR liberou (retomar)"}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => setAguardandoSanearOpen(true)}
+                  disabled={isUpdatingStatus}
+                >
+                  Aguardando SANEAR
+                </button>
+              )}
+
               <button
                 type="button"
                 className="btn-secondary"
@@ -1191,6 +1684,56 @@ const TerceirizadaVisao: React.FC = () => {
                 disabled={isUpdatingStatus}
               >
                 {isUpdatingStatus ? "Atualizando..." : "Serviço executado"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: Aguardando SANEAR (justificativa) */}
+      {modalOs && aguardandoSanearOpen && (
+        <div className="modal-backdrop" onClick={() => setAguardandoSanearOpen(false)}>
+          <div className="modal" style={{ maxWidth: 720, width: "92%" }} onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3 className="modal-title">Aguardando SANEAR</h3>
+              <button type="button" className="modal-close" onClick={() => setAguardandoSanearOpen(false)}>
+                ×
+              </button>
+            </div>
+
+            <div className="modal-body">
+              <div className="page-field" style={{ marginBottom: 12 }}>
+                <label>Motivo</label>
+                <select
+                  className="field-readonly"
+                  value={aguardandoMotivo}
+                  onChange={(e) => setAguardandoMotivo(e.target.value)}
+                >
+                  <option value="SERVICO_PREVIO">Serviço prévio da SANEAR</option>
+                  <option value="BLOQUEIO_ACESSO">Bloqueio / sem acesso</option>
+                  <option value="AGUARDANDO_MATERIAL">Aguardando material / equipe</option>
+                  <option value="OUTRO">Outro</option>
+                </select>
+              </div>
+
+              <div className="page-field">
+                <label>Descrição (curta e objetiva)</label>
+                <textarea
+                  className="field-readonly"
+                  rows={3}
+                  value={aguardandoDescricao}
+                  onChange={(e) => setAguardandoDescricao(e.target.value)}
+                  placeholder="Ex.: SANEAR precisa realizar serviço antes da execução desta OS."
+                />
+              </div>
+            </div>
+
+            <div className="modal-footer">
+              <button type="button" className="btn-secondary" onClick={() => setAguardandoSanearOpen(false)} disabled={isUpdatingStatus}>
+                Cancelar
+              </button>
+              <button type="button" className="btn-primary" onClick={handleMarcarAguardandoSanear} disabled={isUpdatingStatus}>
+                {isUpdatingStatus ? "Salvando..." : "Confirmar"}
               </button>
             </div>
           </div>

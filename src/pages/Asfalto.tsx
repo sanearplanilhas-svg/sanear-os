@@ -8,6 +8,7 @@ import {
 import { db } from "../lib/firebaseClient";
 import { supabase } from "../lib/supabaseClient";
 
+import { SLA_HORAS_PADRAO } from "../lib/sla";
 type AsfaltoProps = {
   onBack: () => void;
 };
@@ -328,6 +329,8 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
         referencia: referencia.trim() || null,
         observacoes: observacoes.trim() || null,
         status: "ABERTA",
+        slaHoras: SLA_HORAS_PADRAO,
+        slaPausas: [],
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
         fotos: fotosData,

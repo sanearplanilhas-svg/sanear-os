@@ -1,13 +1,9 @@
 import React, { useState, type ChangeEvent, type FormEvent } from "react";
-import {
-  collection,
-  doc,
-  setDoc,
-  serverTimestamp,
-} from "firebase/firestore";
-import { db } from "../lib/firebaseClient";
+import { collection, doc, setDoc, serverTimestamp } from "firebase/firestore";
+import { auth, db } from "../lib/firebaseClient";
 import { supabase } from "../lib/supabaseClient";
 
+import { SLA_HORAS_PADRAO } from "../lib/sla";
 type BuracoNaRuaProps = {
   onBack: () => void;
 };
@@ -280,7 +276,8 @@ const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
     try {
       setSaving(true);
 
-      const ordensRef = collection(db, "ordensServico");
+      // ✅ coleção correta
+      const ordensRef = collection(db, "ordens_servico");
       const ordemRef = doc(ordensRef);
 
       // 1) Upload fotos Supabase (opcional)
@@ -317,31 +314,42 @@ const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
         });
       }
 
-      // 2) Salvar Firestore (sem mais campos de PDF)
+      // 2) Salvar Firestore
       await setDoc(ordemRef, {
-        tipo: "CALCAMENTO",
+        // ✅ tipo padronizado
+        tipo: "BURACO_RUA",
+
         protocolo: protocolo.trim() || null,
         ordemServico: ordemServico.trim() || null,
         bairro: bairro.trim() || null,
         rua: rua.trim() || null,
         numero: numero.trim() || null,
+
+        // ✅ campo que a lista/pdfs devem ler
+        pontoReferencia: referencia.trim() || null,
+
+        // mantém compatibilidade
         referencia: referencia.trim() || null,
+
         observacoes: observacoes.trim() || null,
         status: "ABERTA",
+        slaHoras: SLA_HORAS_PADRAO,
+        slaPausas: [],
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
+
+        // ✅ criador (permite regra "criador pode editar")
+        createdByEmail: auth.currentUser?.email?.toLowerCase() ?? null,
+        createdByUid: auth.currentUser?.uid ?? null,
+
         fotos: fotosData,
       });
 
-      // Sucesso: limpa formulário sem mostrar "Formulário limpo."
       handleClear(false);
 
-      // limpa banner e abre modal de sucesso
       setStatusMessage(null);
       setResultType("success");
-      setResultMessage(
-        "Ordem de serviço de Calçamento cadastrada com sucesso."
-      );
+      setResultMessage("Ordem de serviço de Calçamento cadastrada com sucesso.");
       setShowResultModal(true);
     } catch (error: any) {
       console.error(error);
@@ -529,9 +537,7 @@ const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
             <label>Observações</label>
             <textarea
               value={observacoes}
-              onChange={(e) =>
-                handleInputChange("observacoes", e.target.value)
-              }
+              onChange={(e) => handleInputChange("observacoes", e.target.value)}
               placeholder="EX.: TRECHO COM GRANDE FLUXO, NECESSÁRIO APOIO DA GUARDA, BURACO PROFUNDO, RISCO PARA PEDESTRES..."
               disabled={naoDeclarado.observacoes}
             />
@@ -583,9 +589,7 @@ const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
                       onClick={() => handleOpenPreview(foto)}
                     >
                       <img src={foto.url} alt="Foto anexada" />
-                      <span className="photo-timestamp">
-                        {foto.timestamp}
-                      </span>
+                      <span className="photo-timestamp">{foto.timestamp}</span>
                     </div>
                   ))}
                 </div>
@@ -618,17 +622,10 @@ const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
       {/* MODAL DE PRÉ-VISUALIZAÇÃO DA FOTO */}
       {fotoEmPreview && (
         <div className="modal-backdrop" onClick={handleClosePreview}>
-          <div
-            className="modal modal-photo"
-            onClick={(e) => e.stopPropagation()}
-          >
+          <div className="modal modal-photo" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <h3 className="modal-title">Pré-visualização da foto</h3>
-              <button
-                type="button"
-                className="modal-close"
-                onClick={handleClosePreview}
-              >
+              <button type="button" className="modal-close" onClick={handleClosePreview}>
                 ×
               </button>
             </div>
@@ -644,17 +641,11 @@ const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
                   borderRadius: "0.75rem",
                 }}
               />
-              <p className="field-hint">
-                Anexada em {fotoEmPreview.timestamp}
-              </p>
+              <p className="field-hint">Anexada em {fotoEmPreview.timestamp}</p>
             </div>
 
             <div className="modal-footer">
-              <button
-                type="button"
-                className="btn-secondary"
-                onClick={handleClosePreview}
-              >
+              <button type="button" className="btn-secondary" onClick={handleClosePreview}>
                 Fechar
               </button>
               <button
@@ -671,10 +662,7 @@ const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
 
       {/* MODAL CONFIRMAR SALVAR */}
       {showConfirmSave && (
-        <div
-          className="modal-backdrop"
-          onClick={() => !saving && setShowConfirmSave(false)}
-        >
+        <div className="modal-backdrop" onClick={() => !saving && setShowConfirmSave(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <h3 className="modal-title">Confirmar salvamento</h3>
@@ -716,18 +704,11 @@ const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
 
       {/* MODAL CONFIRMAR LIMPAR */}
       {showConfirmClear && (
-        <div
-          className="modal-backdrop"
-          onClick={() => setShowConfirmClear(false)}
-        >
+        <div className="modal-backdrop" onClick={() => setShowConfirmClear(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <h3 className="modal-title">Confirmar limpeza</h3>
-              <button
-                type="button"
-                className="modal-close"
-                onClick={() => setShowConfirmClear(false)}
-              >
+              <button type="button" className="modal-close" onClick={() => setShowConfirmClear(false)}>
                 ×
               </button>
             </div>
@@ -761,22 +742,13 @@ const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
 
       {/* MODAL RESULTADO (SUCESSO / ERRO AO SALVAR) */}
       {showResultModal && (
-        <div
-          className="modal-backdrop"
-          onClick={() => setShowResultModal(false)}
-        >
+        <div className="modal-backdrop" onClick={() => setShowResultModal(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <h3 className="modal-title">
-                {resultType === "success"
-                  ? "Cadastro salvo com sucesso"
-                  : "Erro ao salvar OS"}
+                {resultType === "success" ? "Cadastro salvo com sucesso" : "Erro ao salvar OS"}
               </h3>
-              <button
-                type="button"
-                className="modal-close"
-                onClick={() => setShowResultModal(false)}
-              >
+              <button type="button" className="modal-close" onClick={() => setShowResultModal(false)}>
                 ×
               </button>
             </div>
@@ -784,11 +756,7 @@ const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
               <p>{resultMessage}</p>
             </div>
             <div className="modal-footer">
-              <button
-                type="button"
-                className="btn-primary"
-                onClick={() => setShowResultModal(false)}
-              >
+              <button type="button" className="btn-primary" onClick={() => setShowResultModal(false)}>
                 OK
               </button>
             </div>

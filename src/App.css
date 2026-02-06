@@ -355,44 +355,219 @@ body {
 }
 
 .topbar {
-  height: 64px;
+  height: 56px;
   display: flex;
   align-items: center;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.28);
+  background: rgba(248, 250, 252, 0.92);
+  backdrop-filter: blur(12px);
+  position: sticky;
+  top: 0;
+  z-index: 900;
+}
+
+.topbar-inner{
+  width: 100%;
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 0 1.75rem;
+  display:flex;
+  align-items:center;
   justify-content: space-between;
-  padding: 0.75rem 1.75rem;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.3);
-  background: rgba(248, 250, 252, 0.96);
-  backdrop-filter: blur(10px);
+  gap: 12px;
 }
 
-.topbar-title h2 {
-  margin: 0;
-  font-size: 1.1rem;
+.topbar-left{
+  display:flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 
-.topbar-title span {
-  font-size: 0.8rem;
-  color: #6b7280;
+.topbar-crumbs{
+  display:flex;
+  align-items:center;
+  gap: 6px;
+  font-size: 11px;
+  color: #64748b;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.topbar-user {
-  display: flex;
-  align-items: center;
-  gap: 0.9rem;
-  font-size: 0.85rem;
+.topbar-crumb{
+  white-space: nowrap;
 }
 
-.topbar-user-name {
-  font-weight: 600;
+.topbar-sep{
+  opacity: .65;
 }
 
-.topbar-user-role {
-  padding: 0.2rem 0.6rem;
+.topbar-page-title{
+  font-size: 15px;
+  font-weight: 800;
+  color: #0f172a;
+  line-height: 1.1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.topbar-actions{
+  display:flex;
+  align-items:center;
+  gap: 10px;
+}
+
+/* Usuário (dropdown) */
+.user2-wrapper{
+  position: relative;
+}
+
+.user2-btn{
+  height: 40px;
+  display:flex;
+  align-items:center;
+  gap: 10px;
+  padding: 0 10px 0 8px;
   border-radius: 999px;
-  font-size: 0.75rem;
+  border: 1px solid #d1d5db;
+  background: #ffffff;
+  cursor: pointer;
+  color: #0f172a;
+}
+
+.user2-btn:hover{
+  filter: brightness(0.985);
+}
+
+.user2-avatar{
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  display:grid;
+  place-items:center;
+  font-weight: 800;
+  color: #ffffff;
+  background: linear-gradient(135deg, #6366f1, #22c55e);
+}
+
+.user2-meta{
+  display:flex;
+  flex-direction: column;
+  align-items:flex-start;
+  line-height: 1.05;
+  min-width: 0;
+}
+
+.user2-name{
+  font-size: 13px;
+  font-weight: 800;
+  max-width: 170px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user2-role{
+  font-size: 11px;
+  color: #64748b;
+  font-weight: 700;
+  letter-spacing: .04em;
+}
+
+.user2-caret{
+  opacity: .75;
+  font-size: 12px;
+}
+
+.user2-popover{
+  position: absolute;
+  right: 0;
+  top: 48px;
+  width: 280px;
+  background: #f8fafc;
+  border: 1px solid #e5e7eb;
+  border-radius: 14px;
+  overflow: hidden;
+  z-index: 6500;
+  box-shadow: 0 18px 45px rgba(15, 23, 42, 0.18);
+}
+
+.user2-popover-head{
+  padding: 12px;
+  background: #ffffff;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.user2-popover-title{
+  font-weight: 900;
+  color: #0f172a;
+  font-size: 14px;
+}
+
+.user2-popover-email{
+  margin-top: 2px;
+  font-size: 12px;
+  color: #64748b;
+  word-break: break-word;
+}
+
+.user2-popover-pill{
+  margin-top: 10px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
   border: 1px solid rgba(148, 163, 184, 0.7);
-  color: #111827;
+  color: #0f172a;
   background: #f3f4f6;
+}
+
+.user2-popover-actions{
+  padding: 10px;
+  display:flex;
+  flex-direction: column;
+  gap: 8px;
+  background: rgba(248, 250, 252, 0.92);
+}
+
+.user2-item{
+  text-align:left;
+  border: 1px solid #e5e7eb;
+  background: #ffffff;
+  border-radius: 12px;
+  padding: 10px 12px;
+  cursor: pointer;
+  color: #0f172a;
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.user2-item:hover{
+  filter: brightness(0.985);
+  transform: translateY(-1px);
+}
+
+.user2-item-danger{
+  border-color: rgba(239, 68, 68, 0.35);
+  background: rgba(254, 242, 242, 0.75);
+  color: #b91c1c;
+}
+
+/* Deixa mais compacto em telas menores */
+@media (max-width: 980px){
+  .topbar-crumbs{ display: none; }
+  .user2-name{ max-width: 110px; }
+}
+
+@media (max-width: 720px){
+  .user2-meta{ display:none; }
 }
 
 .page-wrapper {
@@ -703,7 +878,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 50;
+  z-index: 9999;
 }
 
 .modal {
@@ -1436,6 +1611,12 @@ body {
 .kpi-terceirizada {
   border-left: 4px solid #3b82f6;
 }
+.kpi-aguardando {
+  border-left: 4px solid #facc15;
+}
+.kpi-tempo-aguardando {
+  border-left: 4px solid #a855f7;
+}
 
 .dashboard-kpi-header {
   display: flex;
@@ -1811,7 +1992,7 @@ body {
 /* ======= IMPRESSÃO PROFISSIONAL (DASHBOARD) ======= */
 
 @page {
-  size: A4;
+  size: A4 portrait;
   margin: 12mm;
 }
 
@@ -1881,6 +2062,11 @@ body {
   .dashboard-filter-panel,
   .dashboard-print-container,
   .dashboard-tabs {
+    display: none !important;
+  }
+
+  /* Se filtro por período está ativo, não imprimir o card de Produtividade 7 dias */
+  body.print-dashboard-period-filter .dashboard-chart-prod7 {
     display: none !important;
   }
 
@@ -1989,7 +2175,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 9999; /* bem acima do resto */
+  z-index: 10000; /* bem acima do resto */
 }
 
 /* CAIXA DO MODAL (card) */
@@ -2189,8 +2375,8 @@ body {
 
 .notif2-btn {
   position: relative;
-  width: 42px;
-  height: 42px;
+  width: 40px;
+  height: 40px;
   border: 1px solid #d1d5db;
   background: #ffffff;
   color: #0f172a;
@@ -2320,4 +2506,790 @@ body {
   margin-top: 6px;
   font-size: 11px;
   color: #64748b;
+}
+
+
+/* ===== SLA 48h úteis: KPI + Drawer ===== */
+.os-kpi-card-sla{
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+  transition: transform .12s ease, box-shadow .12s ease, background .12s ease;
+}
+.os-kpi-card-sla:hover{
+  transform: translateY(-1px);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, .10);
+}
+.os-kpi-card-sla.is-danger{
+  background: rgba(254, 242, 242, .8);
+  border-color: rgba(239, 68, 68, .35);
+}
+.os-kpi-card-sla.is-danger::after{
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(600px 120px at 20% 0%, rgba(239, 68, 68, .14), transparent 60%);
+  animation: slaGlow 1.6s ease-in-out infinite;
+  pointer-events: none;
+}
+@keyframes slaGlow{
+  0%,100%{ opacity: .55; }
+  50%{ opacity: 1; }
+}
+.os-kpi-card-sla.is-ok{
+  background: rgba(236, 253, 245, .65);
+  border-color: rgba(16, 185, 129, .30);
+}
+.os-kpi-subtle{
+  font-weight: 600;
+  font-size: .78rem;
+  color: #6b7280;
+}
+.os-kpi-pill-danger{
+  background: rgba(239, 68, 68, .10);
+  color: #b91c1c;
+  border: 1px solid rgba(239, 68, 68, .28);
+}
+
+/* Drawer */
+.modal-backdrop.sla-backdrop{
+  justify-content: flex-end;
+}
+.sla-drawer{
+  width: min(560px, 92vw);
+  height: 100%;
+  background: #ffffff;
+  border-radius: 16px 0 0 16px;
+  border-left: 1px solid #e5e7eb;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: -14px 0 40px rgba(15, 23, 42, .20);
+}
+.sla-drawer-header{
+  padding: 1rem 1rem .7rem 1rem;
+  border-bottom: 1px solid #e5e7eb;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.sla-title{
+  margin: 0;
+  font-size: 1.05rem;
+}
+.sla-subtitle{
+  margin: .2rem 0 0 0;
+  color: #6b7280;
+  font-size: .88rem;
+  line-height: 1.35;
+}
+.sla-drawer-body{
+  padding: 0.9rem 1rem 1rem 1rem;
+  overflow: auto;
+}
+.sla-metrics{
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: .6rem;
+  margin-bottom: .85rem;
+}
+.sla-metric{
+  border: 1px solid #e5e7eb;
+  border-radius: .85rem;
+  background: #f9fafb;
+  padding: .6rem .7rem;
+}
+.sla-metric-label{
+  font-size: .78rem;
+  color: #6b7280;
+  font-weight: 600;
+}
+.sla-metric-value{
+  font-size: 1.1rem;
+  font-weight: 800;
+  margin-top: .2rem;
+  color: #111827;
+}
+.sla-section{
+  margin-top: .7rem;
+}
+.sla-section-title{
+  font-weight: 800;
+  margin-bottom: .5rem;
+  color: #111827;
+}
+.sla-empty{
+  border: 1px dashed #d1d5db;
+  border-radius: .85rem;
+  padding: .8rem;
+  color: #6b7280;
+  background: #f9fafb;
+}
+.sla-list{
+  display: flex;
+  flex-direction: column;
+  gap: .45rem;
+}
+.sla-item{
+  width: 100%;
+  text-align: left;
+  border: 1px solid rgba(239, 68, 68, .22);
+  background: rgba(254, 242, 242, .65);
+  border-radius: .95rem;
+  padding: .65rem .7rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .7rem;
+  cursor: pointer;
+  transition: transform .1s ease, box-shadow .1s ease, background .1s ease;
+}
+.sla-item:hover{
+  transform: translateY(-1px);
+  box-shadow: 0 12px 26px rgba(15, 23, 42, .10);
+  background: rgba(254, 242, 242, .8);
+}
+.sla-item:focus-visible{
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, .22);
+}
+.sla-item-main{
+  min-width: 0;
+}
+.sla-item-ident{
+  font-weight: 900;
+  color: #111827;
+  letter-spacing: .2px;
+}
+.sla-item-sub{
+  margin-top: .15rem;
+  font-size: .82rem;
+  color: #6b7280;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 360px;
+}
+.sla-item-age{
+  font-weight: 900;
+  color: #b91c1c;
+  white-space: nowrap;
+}
+.sla-item.sla-item-soon{
+  border-color: rgba(245, 158, 11, .25);
+  background: rgba(255, 251, 235, .8);
+}
+.sla-item.sla-item-soon:hover{
+  background: rgba(255, 251, 235, 1);
+}
+.sla-item.sla-item-soon .sla-item-age{
+  color: #92400e;
+}
+.sla-drawer-footer{
+  padding: .75rem 1rem;
+  border-top: 1px solid #e5e7eb;
+  display: flex;
+  justify-content: flex-end;
+  gap: .6rem;
+}
+
+/* ===== Lista de OS: destaque/pisca ao chegar pelo SLA ===== */
+.os-table-row--blink{
+  animation: osRowBlink 1.2s ease-in-out 0s 10;
+}
+@keyframes osRowBlink{
+  0%,100% { background: rgba(250, 204, 21, .20); }
+  50% { background: rgba(250, 204, 21, 0); }
+}
+.os-table-row--blink td{
+  box-shadow: inset 0 0 0 1px rgba(250, 204, 21, .35);
+}
+
+@media print {
+  body {
+    background: white !important;
+    color: black !important;
+  }
+
+  svg {
+    overflow: visible !important;
+  }
+
+  text {
+    font-size: 14px !important;
+    font-weight: 600 !important;
+  }
+
+  .dashboard-section {
+    break-inside: avoid;
+    page-break-inside: avoid;
+    margin-bottom: 30px;
+  }
+
+  button {
+    display: none !important;
+  }
+}
+
+
+@media print {
+  svg {
+    overflow: visible !important;
+  }
+
+  text {
+    font-size: 12px !important;
+    font-weight: 600 !important;
+  }
+
+  .dashboard-chart-card {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+}
+
+
+
+
+.legend-print-only {
+  display: none;
+}
+
+@media print {
+  .legend-print-only {
+    display: block;
+    margin-top: 6px;
+    font-size: 12px;
+    line-height: 1.4;
+    color: #000;
+  }
+}
+
+.print-only { display: none; }
+@media print {
+  .print-only { display: block; }
+}
+
+/* ------------------------------
+   Dashboard / Modais / Print
+   (cole no final do App.css)
+-------------------------------- */
+
+.print-only { display: none; }
+@media print {
+  .print-only { display: block; }
+}
+
+/* trava scroll quando modal abre */
+.dashboard-lock-scroll {
+  overflow: hidden;
+}
+
+/* backdrop base (serve pro filtro e pro expandido) */
+.dashboard-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 999999; /* ✅ sobe acima do header/topbar */
+  background: rgba(2, 6, 23, 0.72);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;     /* ✅ não fica atrás do topo */
+  padding: 80px 20px 20px;     /* ✅ espaço do header */
+}
+
+/* modal filtro */
+.dashboard-modal {
+  width: min(720px, 96vw);
+  background: #0b1220;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 14px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+
+.dashboard-modal-header,
+.dashboard-expanded-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 16px 16px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.dashboard-modal-title {
+  font-weight: 700;
+  font-size: 15px;
+  color: #e2e8f0;
+}
+
+.dashboard-modal-subtitle,
+.dashboard-expanded-subtitle {
+  margin-top: 6px;
+  font-size: 12px;
+  color: rgba(226, 232, 240, 0.75);
+  max-width: 760px;
+}
+
+.dashboard-modal-close {
+  border: 0;
+  background: rgba(148, 163, 184, 0.12);
+  color: rgba(226, 232, 240, 0.92);
+  border-radius: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.dashboard-modal-body {
+  padding: 16px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.dashboard-modal-footer {
+  padding: 14px 16px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  border-top: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.dashboard-filter-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: rgba(226, 232, 240, 0.85);
+}
+
+.dashboard-filter-field input {
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(2, 6, 23, 0.4);
+  color: rgba(226, 232, 240, 0.92);
+  padding: 10px 10px;
+}
+
+.dashboard-filter-button,
+.dashboard-print-button,
+.dashboard-filter-clear {
+  border: 0;
+  border-radius: 12px;
+  padding: 10px 12px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.dashboard-filter-button {
+  background: #16a34a;
+  color: #07110b;
+}
+
+.dashboard-filter-clear {
+  background: rgba(148, 163, 184, 0.12);
+  color: rgba(226, 232, 240, 0.92);
+}
+
+.dashboard-print-button {
+  background: #22c55e;
+  color: #07110b;
+}
+
+/* modal expandido */
+.dashboard-expanded-modal {
+  width: min(1150px, 96vw);
+  background: #0b1220;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 14px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+
+  max-height: calc(100vh - 110px);
+  overflow: hidden;
+}
+
+.dashboard-expanded-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.dashboard-expanded-dates {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.dashboard-expanded-title {
+  font-weight: 800;
+  font-size: 15px;
+  color: #e2e8f0;
+}
+
+.dashboard-expanded-body {
+  padding: 16px;
+  overflow: auto;
+  max-height: calc(100vh - 190px);
+}
+
+/* cards/graficos */
+.dashboard-charts-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+@media (max-width: 980px) {
+  .dashboard-charts-grid { grid-template-columns: 1fr; }
+  .dashboard-modal-body { grid-template-columns: 1fr; }
+}
+
+.dashboard-chart-card {
+  background: #ffffff
+}
+
+.dashboard-chart-card--clickable {
+  cursor: pointer;
+  transition: transform 120ms ease, border-color 120ms ease;
+}
+.dashboard-chart-card--clickable:hover {
+  transform: translateY(-1px);
+  border-color: rgba(34, 197, 94, 0.35);
+}
+
+.dashboard-chart-header {
+  padding: 14px 14px 10px 14px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.dashboard-chart-header h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 800;
+  color: rgba(226, 232, 240, 0.95);
+}
+
+.dashboard-chart-sub {
+  margin: 6px 0 0 0;
+  font-size: 12px;
+  color: rgba(226, 232, 240, 0.72);
+}
+
+.dashboard-chart-body {
+  padding: 10px 10px 12px 10px;
+}
+
+/* resumo numerico no modal */
+.dashboard-resumo-numerico {
+  margin: 12px 10px 6px 10px;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px dashed rgba(148, 163, 184, 0.25);
+  background: rgba(2, 6, 23, 0.45);
+}
+
+.dashboard-resumo-title {
+  font-weight: 800;
+  font-size: 13px;
+  color: rgba(226, 232, 240, 0.92);
+  margin-bottom: 8px;
+}
+
+.dashboard-resumo-linhas {
+  display: grid;
+  gap: 6px;
+}
+
+.dashboard-resumo-linha {
+  font-size: 12px;
+  color: rgba(226, 232, 240, 0.85);
+}
+
+/* impressão: imprimir só o expandido */
+@media print {
+  body.print-expanded-only * {
+    visibility: hidden !important;
+  }
+  body.print-expanded-only #dashboard-expanded-print-root,
+  body.print-expanded-only #dashboard-expanded-print-root * {
+    visibility: visible !important;
+  }
+
+  body.print-expanded-only #dashboard-expanded-print-root {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    background: white !important;
+    border: 0 !important;
+  }
+
+  /* deixa o SVG com espaço extra pra legenda */
+  body.print-expanded-only .dashboard-chart-body {
+    padding-bottom: 18px !important;
+  }
+
+  /* garantir 1 folha (A4 retrato) */
+  body.print-expanded-only #dashboard-expanded-print-root {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+    max-height: 270mm !important;
+    overflow: hidden !important;
+  }
+
+  /* resumo pode empurrar para 2ª página: esconder no print do expandido */
+  body.print-expanded-only .dashboard-resumo-numerico {
+    display: none !important;
+  }
+}
+
+/* ===== Recharts: texto escuro (tema claro) ===== */
+.recharts-wrapper text {
+  fill: #111827 !important; /* cor das letras no SVG */
+}
+
+.recharts-cartesian-axis-tick-value,
+.recharts-label-list text,
+.recharts-text {
+  fill: #111827 !important;
+}
+
+/* legenda */
+.recharts-legend-item-text {
+  fill: #111827 !important;
+}
+
+/* valores do tooltip (quando usa tooltip default) */
+.recharts-default-tooltip {
+  color: #111827 !important;
+}
+
+
+/* NOVO AQUI */
+
+/* =========================
+   FIX: Dashboard claro (cards)
+   ========================= */
+
+/* 1) Corrige o erro de sintaxe que estava quebrando regras */
+.dashboard-chart-card {
+  background: #ffffff !important;
+  border: 1px solid rgba(148, 163, 184, 0.18) !important;
+  border-radius: 16px !important;
+  overflow: hidden !important;
+  color: #111827 !important;
+}
+
+/* 2) Header do card no tema claro */
+.dashboard-chart-header {
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18) !important;
+}
+
+.dashboard-chart-header h3 {
+  color: #111827 !important;
+}
+
+.dashboard-chart-sub {
+  color: #6b7280 !important;
+}
+
+/* 3) Corpo do card */
+.dashboard-chart-body {
+  background: #ffffff !important;
+}
+
+/* 4) Recharts: garante textos visíveis no tema claro */
+.recharts-wrapper text,
+.recharts-cartesian-axis-tick-value,
+.recharts-label-list text,
+.recharts-text,
+.recharts-legend-item-text {
+  fill: #111827 !important;
+}
+
+/* Tooltip (quando cair no default) */
+.recharts-default-tooltip {
+  background-color: #ffffff !important;
+  border: 1px solid rgba(148, 163, 184, 0.35) !important;
+  color: #111827 !important;
+}
+
+
+/* =========================================================
+   FIX PRINT: Legenda + Expandido imprimir 1 folha com gráfico
+   (cole no FINAL do App.css)
+========================================================= */
+
+/* Legenda “de papel” (o React já renderiza essa div) */
+.legend-print-only {
+  display: none;
+}
+
+@media print {
+  .legend-print-only {
+    display: block !important;
+    margin-top: 6px !important;
+    font-size: 12px !important;
+    line-height: 1.35 !important;
+    color: #000 !important;
+  }
+}
+
+/* Recharts: evita recorte no print */
+@media print {
+  .recharts-wrapper,
+  .recharts-surface,
+  .recharts-responsive-container,
+  svg {
+    overflow: visible !important;
+  }
+}
+
+/* ============ PRINT APENAS DO EXPANDIDO ============ */
+@media print {
+  /* O seu CSS antigo escondia o modal/backdrop no print e matava o gráfico.
+     Aqui a gente SOBRESCREVE quando o body está em print-expanded-only. */
+
+  body.print-expanded-only .dashboard-modal-backdrop {
+    display: flex !important;
+    background: transparent !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    padding: 0 !important;
+    align-items: flex-start !important;
+    justify-content: center !important;
+  }
+
+  body.print-expanded-only .dashboard-expanded-modal {
+    width: 100% !important;
+    max-width: none !important;
+    max-height: none !important;
+    overflow: visible !important;
+    border: 0 !important;
+    box-shadow: none !important;
+    background: #ffffff !important;
+  }
+
+  /* Esconde cabeçalho/controles do modal expandido no papel */
+  body.print-expanded-only .dashboard-expanded-header,
+  body.print-expanded-only .dashboard-expanded-controls,
+  body.print-expanded-only .dashboard-expanded-dates,
+  body.print-expanded-only .dashboard-modal-close,
+  body.print-expanded-only button {
+    display: none !important;
+  }
+
+  /* Só imprime o root do gráfico */
+  body.print-expanded-only * {
+    visibility: hidden !important;
+  }
+
+  body.print-expanded-only #dashboard-expanded-print-root,
+  body.print-expanded-only #dashboard-expanded-print-root * {
+    visibility: visible !important;
+  }
+
+  body.print-expanded-only #dashboard-expanded-print-root {
+    position: relative !important;
+    left: auto !important;
+    top: auto !important;
+    width: 100% !important;
+    background: #ffffff !important;
+    border: 0 !important;
+    box-shadow: none !important;
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+  }
+
+  /* ✅ força caber em 1 folha (ajusta a altura do container do gráfico) */
+  body.print-expanded-only
+    #dashboard-expanded-print-root
+    .recharts-responsive-container {
+    height: 420px !important; /* A4 retrato -> 1 folha com legenda */
+  }
+
+  body.print-expanded-only
+    #dashboard-expanded-print-root
+    .dashboard-resumo-numerico {
+    border: 1px dashed #cbd5e1 !important;
+    background: #ffffff !important;
+    color: #000 !important;
+  }
+
+  body.print-expanded-only
+    #dashboard-expanded-print-root
+    .dashboard-resumo-title,
+  body.print-expanded-only
+    #dashboard-expanded-print-root
+    .dashboard-resumo-linha {
+    color: #000 !important;
+  }
+}
+
+/* =========================
+   Dashboard: Motivos Aguardando SANEAR
+   ========================= */
+
+.dashboard-motivos-body {
+  padding: 0.4rem 0.2rem 0.1rem;
+}
+
+.dashboard-motivos-list {
+  display: grid;
+  gap: 10px;
+}
+
+.dashboard-motivo-row {
+  display: grid;
+  grid-template-columns: 1fr 180px 34px;
+  gap: 10px;
+  align-items: center;
+}
+
+.dashboard-motivo-label {
+  font-size: 0.9rem;
+  color: #0f172a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dashboard-motivo-bar-wrap {
+  height: 10px;
+  background: #e5e7eb;
+  border-radius: 9999px;
+  overflow: hidden;
+  border: 1px solid #e5e7eb;
+}
+
+.dashboard-motivo-bar {
+  height: 100%;
+  border-radius: 9999px;
+  background: linear-gradient(90deg, #facc15, #f97316);
+}
+
+.dashboard-motivo-count {
+  text-align: right;
+  font-weight: 800;
+  color: #111827;
+}
+
+.dashboard-empty-state {
+  padding: 0.75rem 0.2rem;
+  font-size: 0.9rem;
+  color: #64748b;
+}
+
+
+/* KPI: OS atrasadas (72h) */
+.dashboard-kpi-card.kpi-atrasadas{
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.06);
 }

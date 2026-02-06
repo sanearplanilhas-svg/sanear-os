@@ -19,6 +19,7 @@ import {
 } from "firebase/firestore";
 import { db, auth } from "../lib/firebaseClient";
 import { supabase } from "../lib/supabaseClient";
+import { upsertSanearPause, closeSanearPause, hasOpenSanearPause } from "../lib/sla";
 
 // pdf-lib para gerar o PDF com os dados da OS
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
@@ -44,6 +45,11 @@ type FirestoreOS = {
   createdAt?: Timestamp | null;
   createdByEmail?: string | null;
   dataExecucao?: Timestamp | null;
+
+  // SLA (72h) e pausa SANEAR
+  slaHoras?: number | null;
+  slaPausas?: any[] | null;
+  statusAntesAguardandoSanear?: string | null;
 
   // ainda mantido por compatibilidade, mas não usado para gerar o PDF de dados
   ordemServicoPdfBase64?: string | null;
@@ -204,6 +210,76 @@ function sanitizeForStoragePath(name: string): string {
     .replace(/[^a-zA-Z0-9.\-_]/g, "_");
 }
 
+/**
+ * PASSO 3: limpa arquivos do Supabase Storage ao excluir OS
+ * Remove recursivamente tudo dentro do prefix (pasta).
+ * Ex.: "asfalto/<osId>" ou "buraco-rua/<osId>"
+ */
+async function removeStorageFolderRecursive(prefix: string): Promise<number> {
+  const LIMIT = 1000;
+
+  async function listAll(path: string) {
+    const all: any[] = [];
+    let offset = 0;
+
+    while (true) {
+      const { data, error } = await supabase.storage
+        .from(STORAGE_BUCKET)
+        .list(path, { limit: LIMIT, offset });
+
+      if (error) throw error;
+      if (!data || data.length === 0) break;
+
+      all.push(...data);
+
+      if (data.length < LIMIT) break;
+      offset += LIMIT;
+    }
+
+    return all;
+  }
+
+  async function walk(path: string, depth: number): Promise<number> {
+    if (depth > 8) return 0; // proteção contra loop/estrutura inesperada
+
+    const items = await listAll(path);
+    if (!items.length) return 0;
+
+    const filesToRemove: string[] = [];
+    const foldersToWalk: string[] = [];
+
+    for (const it of items) {
+      const name = typeof it?.name === "string" ? it.name : "";
+      if (!name) continue;
+
+      // Em geral: arquivos vêm com metadata, pastas vêm sem metadata
+      const isFolder = !it?.metadata;
+      const fullPath = path ? `${path}/${name}` : name;
+
+      if (isFolder) foldersToWalk.push(fullPath);
+      else filesToRemove.push(fullPath);
+    }
+
+    // remove arquivos em blocos (evita payload grande)
+    let removedCount = 0;
+    for (let i = 0; i < filesToRemove.length; i += 900) {
+      const chunk = filesToRemove.slice(i, i + 900);
+      const { error } = await supabase.storage.from(STORAGE_BUCKET).remove(chunk);
+      if (error) throw error;
+      removedCount += chunk.length;
+    }
+
+    // desce em subpastas
+    for (const folder of foldersToWalk) {
+      removedCount += await walk(folder, depth + 1);
+    }
+
+    return removedCount;
+  }
+
+  return await walk(prefix, 0);
+}
+
 // Normaliza o nome dos campos de fotos da abertura (operador)
 function resolveFotosAbertura(raw: any): any[] | null {
   return (
@@ -233,6 +309,10 @@ const ListaOrdensServico: React.FC = () => {
 
   const [busca, setBusca] = useState("");
 
+  // Destaque automático vindo do alerta de SLA (48h úteis)
+  const [highlightRowKey, setHighlightRowKey] = useState<string | null>(null);
+  const pendingHighlightRef = useRef<string | null>(null);
+
   // filtros adicionais (sem alterar o buscar)
   const [filtroDataCriacao, setFiltroDataCriacao] = useState<string>("");
   const [filtroStatus, setFiltroStatus] = useState<StatusFiltroOs>("TODAS");
@@ -259,6 +339,11 @@ const ListaOrdensServico: React.FC = () => {
 
   // modal de detalhes (texto / edição)
   const [detailsModalOs, setDetailsModalOs] = useState<FirestoreOS | null>(null);
+
+  // ===== Aguardando SANEAR (SLA pausado) =====
+  const [aguardandoSanearOpen, setAguardandoSanearOpen] = useState(false);
+  const [aguardandoMotivo, setAguardandoMotivo] = useState("SERVICO_PREVIO");
+  const [aguardandoDescricao, setAguardandoDescricao] = useState("");
 
   // modal do PDF com dados da OS
   const [pdfModalOs, setPdfModalOs] = useState<FirestoreOS | null>(null);
@@ -311,7 +396,8 @@ const ListaOrdensServico: React.FC = () => {
             bairro: raw.bairro ?? null,
             rua: raw.rua ?? null,
             numero: raw.numero ?? null,
-            pontoReferencia: raw.pontoReferencia ?? null,
+            // ✅ manter compatibilidade com "referencia"
+            pontoReferencia: raw.pontoReferencia ?? raw.referencia ?? null,
             observacoes: raw.observacoes ?? null,
             status: raw.status ?? null,
             createdAt: raw.createdAt ?? null,
@@ -583,6 +669,66 @@ const ListaOrdensServico: React.FC = () => {
     ordenacaoDirecao,
   ]);
 
+  // ======= Destaque / navegação vinda de outras telas (ex.: Alerta SLA) =======
+
+  // Se veio um destaque, rola até a linha quando ela existir no DOM
+  useEffect(() => {
+    const key = pendingHighlightRef.current;
+    if (!key) return;
+
+    const t = window.setTimeout(() => {
+      const el = document.querySelector(
+        `[data-os-key="${key}"]`
+      ) as HTMLElement | null;
+
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        pendingHighlightRef.current = null;
+      }
+    }, 150);
+
+    return () => window.clearTimeout(t);
+  }, [filtradas]);
+
+  // Lê o "alvo" (OS) vindo de outras telas (ex.: alerta SLA) e aplica destaque
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const raw = window.sessionStorage.getItem("sanear-listaos-highlight");
+    if (!raw) return;
+
+    try {
+      const payload = JSON.parse(raw) as {
+        osId: string;
+        origem: OrigemOS;
+        numero?: string;
+      };
+
+      const key = `${payload.origem}:${payload.osId}`;
+
+      pendingHighlightRef.current = key;
+      setHighlightRowKey(key);
+
+      // Garante visibilidade da OS
+      setFiltroStatus("TODAS");
+      setFiltroDataCriacao("");
+
+      // Se veio nº/protocolo, já filtra na busca (melhor UX)
+      setBusca(payload.numero ? String(payload.numero) : "");
+
+      window.sessionStorage.removeItem("sanear-listaos-highlight");
+
+      const t = window.setTimeout(() => {
+        setHighlightRowKey((prev) => (prev === key ? null : prev));
+        pendingHighlightRef.current = null;
+      }, 12000);
+
+      return () => window.clearTimeout(t);
+    } catch {
+      window.sessionStorage.removeItem("sanear-listaos-highlight");
+    }
+  }, []);
+
   function handleSearchChange(e: ChangeEvent<HTMLInputElement>) {
     setBusca(e.target.value);
   }
@@ -691,9 +837,14 @@ const ListaOrdensServico: React.FC = () => {
     });
 
     const pdfBytes = await pdfDoc.save();
-    const blob = new Blob([pdfBytes as unknown as BlobPart], {
-      type: "application/pdf",
-    });
+
+    // ✅ correção TS: Uint8Array -> ArrayBuffer para BlobPart
+    const pdfArrayBuffer = pdfBytes.buffer.slice(
+      pdfBytes.byteOffset,
+      pdfBytes.byteOffset + pdfBytes.byteLength
+    ) as ArrayBuffer;
+
+    const blob = new Blob([pdfArrayBuffer], { type: "application/pdf" });
     return URL.createObjectURL(blob);
   }
 
@@ -727,9 +878,7 @@ const ListaOrdensServico: React.FC = () => {
   }
 
   function closePdfModal() {
-    if (pdfModalUrl) {
-      URL.revokeObjectURL(pdfModalUrl);
-    }
+    if (pdfModalUrl) URL.revokeObjectURL(pdfModalUrl);
     setPdfModalUrl(null);
     setPdfModalOs(null);
     setPdfModalLoading(false);
@@ -739,7 +888,102 @@ const ListaOrdensServico: React.FC = () => {
     window.print();
   }
 
-  async function handleDeleteOs(os: FirestoreOS) {
+  // ✅ PASSO 3: delete com cleanup no Storage
+  
+async function handleMarcarAguardandoSanear() {
+  if (!detailsModalOs) return;
+
+  const descricao = aguardandoDescricao.trim();
+  if (descricao.length < 3) {
+    openAlertModal("Descrição obrigatória", "Informe uma descrição curta do motivo (mín. 3 caracteres).");
+    return;
+  }
+
+  try {
+    setSavingDetails(true);
+
+    const collectionName =
+      detailsModalOs.origem === "asfalto" ? "ordensServico" : "ordens_servico";
+
+    const statusAtual = normalizeStatus(detailsModalOs.status);
+    const statusAntes =
+      detailsModalOs.statusAntesAguardandoSanear ??
+      (statusAtual && statusAtual !== "AGUARDANDO_SANEAR" ? statusAtual : "ABERTA");
+
+    const pausasAtualizadas = upsertSanearPause(detailsModalOs.slaPausas, {
+      motivo: aguardandoMotivo,
+      descricao,
+      inicioEm: serverTimestamp(),
+    });
+
+    await updateDoc(doc(db, collectionName, detailsModalOs.id), {
+      status: "AGUARDANDO_SANEAR",
+      statusAntesAguardandoSanear: statusAntes,
+      slaPausas: pausasAtualizadas,
+      updatedAt: serverTimestamp(),
+    });
+
+    setDetailsModalOs((prev) =>
+      prev
+        ? {
+            ...prev,
+            status: "AGUARDANDO_SANEAR",
+            statusAntesAguardandoSanear: statusAntes,
+            slaPausas: pausasAtualizadas,
+          }
+        : prev
+    );
+
+    setAguardandoSanearOpen(false);
+    setAguardandoDescricao("");
+    setStatusMessage("OS marcada como Aguardando SANEAR.");
+    setStatusType("success");
+  } catch (e) {
+    console.error(e);
+    setStatusMessage("Não foi possível marcar como Aguardando SANEAR.");
+    setStatusType("error");
+  } finally {
+    setSavingDetails(false);
+  }
+}
+
+async function handleRetomarSanear() {
+  if (!detailsModalOs) return;
+
+  try {
+    setSavingDetails(true);
+
+    const collectionName =
+      detailsModalOs.origem === "asfalto" ? "ordensServico" : "ordens_servico";
+
+    const pausasFechadas = closeSanearPause(detailsModalOs.slaPausas, serverTimestamp());
+    const novoStatus = detailsModalOs.statusAntesAguardandoSanear || "ABERTA";
+
+    await updateDoc(doc(db, collectionName, detailsModalOs.id), {
+      status: novoStatus,
+      statusAntesAguardandoSanear: null,
+      slaPausas: pausasFechadas,
+      updatedAt: serverTimestamp(),
+    });
+
+    setDetailsModalOs((prev) =>
+      prev
+        ? { ...prev, status: novoStatus, statusAntesAguardandoSanear: null, slaPausas: pausasFechadas }
+        : prev
+    );
+
+    setStatusMessage("OS retomada com sucesso.");
+    setStatusType("success");
+  } catch (e) {
+    console.error(e);
+    setStatusMessage("Não foi possível retomar a OS.");
+    setStatusType("error");
+  } finally {
+    setSavingDetails(false);
+  }
+}
+
+async function handleDeleteOs(os: FirestoreOS) {
     const confirmDelete = window.confirm(
       "Tem certeza que deseja excluir esta ordem de serviço? Esta ação não pode ser desfeita."
     );
@@ -749,10 +993,34 @@ const ListaOrdensServico: React.FC = () => {
       const collectionName =
         os.origem === "asfalto" ? "ordensServico" : "ordens_servico";
 
+      // Cleanup no Storage ANTES de deletar o doc
+      const basePath = os.origem === "asfalto" ? "asfalto" : "buraco-rua";
+      const prefix = `${basePath}/${os.id}`;
+
+      let storageOk = true;
+      let removedFiles = 0;
+
+      try {
+        removedFiles = await removeStorageFolderRecursive(prefix);
+      } catch (e) {
+        storageOk = false;
+        console.error("Falha ao remover arquivos do Storage:", e);
+      }
+
       await deleteDoc(doc(db, collectionName, os.id));
       setDetailsModalOs(null);
-      setStatusMessage("Ordem de serviço excluída com sucesso.");
-      setStatusType("success");
+
+      if (storageOk) {
+        setStatusMessage(
+          `Ordem de serviço excluída com sucesso. Arquivos removidos do Storage: ${removedFiles}.`
+        );
+        setStatusType("success");
+      } else {
+        setStatusMessage(
+          "OS excluída, porém houve falha ao remover alguns arquivos do Storage (ver console)."
+        );
+        setStatusType("info");
+      }
     } catch (error) {
       console.error(error);
       setStatusMessage(
@@ -767,11 +1035,30 @@ const ListaOrdensServico: React.FC = () => {
     setIsEditingDetails(false);
   }
 
-  async function handleSaveDetails() {
+  function normalizeStatus(value: string | null | undefined): string {
+  return String(value ?? "").trim().toUpperCase();
+}
+
+async function handleSaveDetails() {
     if (!detailsModalOs) return;
 
+    const stAtual = normalizeStatus(detailsModalOs.status);
+    const temPausaSanearAtiva = stAtual === "AGUARDANDO_SANEAR" || hasOpenSanearPause(detailsModalOs.slaPausas);
+    const querConcluir = stAtual.startsWith("CONCLU");
+
+    if (temPausaSanearAtiva && querConcluir) {
+      openAlertModal(
+        "Aguardando SANEAR",
+        "Esta OS está com SLA pausado (Aguardando SANEAR). Retome a OS (SANEAR liberou) antes de concluir."
+      );
+      return;
+    }
+
     if (!canEditOs(detailsModalOs)) {
-      openAlertModal("Sem permissão", "Você não tem permissão para editar esta OS.");
+      openAlertModal(
+        "Sem permissão",
+        "Você não tem permissão para editar esta OS."
+      );
       return;
     }
 
@@ -898,7 +1185,10 @@ const ListaOrdensServico: React.FC = () => {
     }
 
     if (!canEditOs(os)) {
-      openAlertModal("Sem permissão", "Você não tem permissão para excluir fotos desta OS.");
+      openAlertModal(
+        "Sem permissão",
+        "Você não tem permissão para excluir fotos desta OS."
+      );
       return;
     }
 
@@ -912,10 +1202,14 @@ const ListaOrdensServico: React.FC = () => {
     const fotoAtual = fotosNormalizadas[currentIndex];
 
     try {
-      const collectionName = os.origem === "asfalto" ? "ordensServico" : "ordens_servico";
+      const collectionName =
+        os.origem === "asfalto" ? "ordensServico" : "ordens_servico";
 
-      const originalArray: any[] = (tipo === "abertura" ? os.fotos : os.fotosExecucao) || [];
-      const updatedArray = originalArray.filter((_f, idx) => idx !== fotoAtual.sourceIndex);
+      const originalArray: any[] =
+        (tipo === "abertura" ? os.fotos : os.fotosExecucao) || [];
+      const updatedArray = originalArray.filter(
+        (_f, idx) => idx !== fotoAtual.sourceIndex
+      );
 
       await updateDoc(doc(db, collectionName, os.id), {
         [tipo === "abertura" ? "fotos" : "fotosExecucao"]: updatedArray,
@@ -928,7 +1222,10 @@ const ListaOrdensServico: React.FC = () => {
       setPhotoModal((prev) => {
         if (!prev) return prev;
         const normalizedNew = normalizeFotos(updatedArray);
-        const nextIndex = normalizedNew.length === 0 ? 0 : Math.min(prev.currentIndex, normalizedNew.length - 1);
+        const nextIndex =
+          normalizedNew.length === 0
+            ? 0
+            : Math.min(prev.currentIndex, normalizedNew.length - 1);
         return { ...prev, currentIndex: nextIndex };
       });
     } catch (error) {
@@ -952,7 +1249,10 @@ const ListaOrdensServico: React.FC = () => {
     const os = getOsFromPhotoModal(photoModal);
     if (!os) {
       e.target.value = "";
-      openAlertModal("OS não encontrada", "Não foi possível localizar esta OS para adicionar fotos.");
+      openAlertModal(
+        "OS não encontrada",
+        "Não foi possível localizar esta OS para adicionar fotos."
+      );
       return;
     }
 
@@ -964,7 +1264,10 @@ const ListaOrdensServico: React.FC = () => {
 
     if (!canEditOs(os)) {
       e.target.value = "";
-      openAlertModal("Sem permissão", "Você não tem permissão para adicionar fotos nesta OS.");
+      openAlertModal(
+        "Sem permissão",
+        "Você não tem permissão para adicionar fotos nesta OS."
+      );
       return;
     }
 
@@ -1012,7 +1315,9 @@ const ListaOrdensServico: React.FC = () => {
 
         if (uploadError) {
           console.error(uploadError);
-          throw new Error(`Erro ao enviar foto "${originalName}" para o armazenamento.`);
+          throw new Error(
+            `Erro ao enviar foto "${originalName}" para o armazenamento.`
+          );
         }
 
         const { data } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(path);
@@ -1021,9 +1326,11 @@ const ListaOrdensServico: React.FC = () => {
         novosItens.push({ id, nomeArquivo: originalName, dataAnexoTexto, url });
       }
 
-      const collectionName = os.origem === "asfalto" ? "ordensServico" : "ordens_servico";
+      const collectionName =
+        os.origem === "asfalto" ? "ordensServico" : "ordens_servico";
 
-      const originalArray: any[] = (tipo === "abertura" ? os.fotos : os.fotosExecucao) || [];
+      const originalArray: any[] =
+        (tipo === "abertura" ? os.fotos : os.fotosExecucao) || [];
       const updatedArray = [...originalArray, ...novosItens];
 
       await updateDoc(doc(db, collectionName, os.id), {
@@ -1035,7 +1342,9 @@ const ListaOrdensServico: React.FC = () => {
       setStatusType("success");
 
       // vai para a última foto
-      setPhotoModal((prev) => (prev ? { ...prev, currentIndex: updatedArray.length - 1 } : prev));
+      setPhotoModal((prev) =>
+        prev ? { ...prev, currentIndex: updatedArray.length - 1 } : prev
+      );
     } catch (error) {
       console.error(error);
       setStatusMessage("Não foi possível adicionar as fotos. Tente novamente mais tarde.");
@@ -1051,7 +1360,10 @@ const ListaOrdensServico: React.FC = () => {
 
     const os = getOsFromPhotoModal(photoModal);
     if (!os) {
-      openAlertModal("OS não encontrada", "Não foi possível localizar esta OS para imprimir a foto.");
+      openAlertModal(
+        "OS não encontrada",
+        "Não foi possível localizar esta OS para imprimir a foto."
+      );
       return;
     }
 
@@ -1062,7 +1374,9 @@ const ListaOrdensServico: React.FC = () => {
     }
 
     const foto = fotos[photoModal.currentIndex] ?? fotos[0];
-    const titulo = `OS ${os.ordemServico || os.protocolo || os.id} - ${foto.label || "Foto"}`;
+    const titulo = `OS ${os.ordemServico || os.protocolo || os.id} - ${
+      foto.label || "Foto"
+    }`;
 
     setPrintPhoto({ title: titulo, url: foto.url });
   }
@@ -1202,6 +1516,88 @@ const ListaOrdensServico: React.FC = () => {
         </div>
       )}
 
+
+      {aguardandoSanearOpen && (
+        <div
+          className="modal-backdrop"
+          onClick={() => {
+            if (!savingDetails) setAguardandoSanearOpen(false);
+          }}
+        >
+          <div
+            className="modal"
+            onClick={(e) => e.stopPropagation()}
+            style={{ maxWidth: "640px", width: "92%" }}
+          >
+            <div className="modal-header">
+              <h3 className="modal-title">Aguardando SANEAR</h3>
+              <button
+                type="button"
+                className="modal-close"
+                onClick={() => {
+                  if (!savingDetails) setAguardandoSanearOpen(false);
+                }}
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="modal-body">
+              <p style={{ marginTop: 0, color: "#374151", lineHeight: 1.4 }}>
+                Use quando a terceirizada não consegue executar porque depende de um serviço prévio
+                da SANEAR. Enquanto estiver aguardando, o SLA fica pausado.
+              </p>
+
+              <div className="page-field" style={{ marginTop: "0.75rem" }}>
+                <label>Motivo</label>
+                <select
+                  value={aguardandoMotivo}
+                  onChange={(e) => setAguardandoMotivo(e.target.value)}
+                  disabled={savingDetails}
+                >
+                  <option value="SERVICO_PREVIO">Serviço prévio da SANEAR</option>
+                  <option value="BLOQUEIO_ACESSO">Bloqueio / acesso</option>
+                  <option value="SEM_MATERIAL">Sem material</option>
+                  <option value="RISCO">Risco / segurança</option>
+                  <option value="OUTRO">Outro</option>
+                </select>
+              </div>
+
+              <div className="page-field" style={{ marginTop: "0.75rem" }}>
+                <label>Descrição (obrigatória)</label>
+                <textarea
+                  value={aguardandoDescricao}
+                  onChange={(e) => setAguardandoDescricao(e.target.value)}
+                  placeholder="Ex.: SANEAR precisa fazer manutenção na rede antes da execução."
+                  rows={4}
+                  disabled={savingDetails}
+                />
+              </div>
+            </div>
+
+            <div className="modal-footer">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setAguardandoSanearOpen(false)}
+                disabled={savingDetails}
+              >
+                Cancelar
+              </button>
+
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={handleMarcarAguardandoSanear}
+                disabled={savingDetails}
+              >
+                {savingDetails ? "Salvando..." : "Confirmar"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Filtros + busca (Buscar continua igual) */}
       <div className="os-toolbar">
         <div
@@ -1280,10 +1676,7 @@ const ListaOrdensServico: React.FC = () => {
         )}
 
         {!loading && filtradas.length > 0 && (
-          <div
-            className="os-table-wrapper"
-            style={{ overflow: "auto", maxHeight: "70vh" }}
-          >
+          <div className="os-table-wrapper" style={{ overflow: "auto", maxHeight: "70vh" }}>
             <table className="os-table">
               <thead style={{ position: "sticky", top: 0, zIndex: 9, background: "#fff" }}>
                 <tr>
@@ -1302,11 +1695,14 @@ const ListaOrdensServico: React.FC = () => {
                   const qtdAbertura = normalizeFotos(os.fotos).length;
                   const qtdExecucao = normalizeFotos(os.fotosExecucao).length;
                   const totalFotos = qtdAbertura + qtdExecucao;
+                  const osKey = `${os.origem}:${os.id}`;
+                  const isBlink = highlightRowKey === osKey;
 
                   return (
                     <tr
-                      key={`${os.origem}:${os.id}`}
-                      className="os-table-row"
+                      key={osKey}
+                      data-os-key={osKey}
+                      className={`os-table-row ${isBlink ? "os-table-row--blink" : ""}`}
                       onClick={() => {
                         setDetailsModalOs(os);
                         setIsEditingDetails(false);
@@ -1354,7 +1750,10 @@ const ListaOrdensServico: React.FC = () => {
                                 setIsEditingDetails(true);
                               } else {
                                 setIsEditingDetails(false);
-                                openAlertModal("Sem permissão", "Você não tem permissão para editar esta OS.");
+                                openAlertModal(
+                                  "Sem permissão",
+                                  "Você não tem permissão para editar esta OS."
+                                );
                               }
                             }}
                           >
@@ -1411,7 +1810,9 @@ const ListaOrdensServico: React.FC = () => {
             </div>
 
             <div style={{ flex: 1 }}>
-              {pdfModalLoading && <div className="os-empty">Gerando PDF com dados da OS...</div>}
+              {pdfModalLoading && (
+                <div className="os-empty">Gerando PDF com dados da OS...</div>
+              )}
               {!pdfModalLoading && pdfModalUrl && (
                 <iframe
                   src={pdfModalUrl}
@@ -1434,7 +1835,8 @@ const ListaOrdensServico: React.FC = () => {
           >
             <div className="modal-header">
               <h3 className="modal-title">
-                Detalhes da OS {detailsModalOs.ordemServico || detailsModalOs.protocolo || detailsModalOs.id}
+                Detalhes da OS{" "}
+                {detailsModalOs.ordemServico || detailsModalOs.protocolo || detailsModalOs.id}
               </h3>
               <button
                 type="button"
@@ -1548,7 +1950,9 @@ const ListaOrdensServico: React.FC = () => {
                       readOnly={readOnlyEditableFields}
                       value={detailsModalOs.bairro ?? ""}
                       onChange={(e) =>
-                        setDetailsModalOs((prev) => (prev ? { ...prev, bairro: e.target.value } : prev))
+                        setDetailsModalOs((prev) =>
+                          prev ? { ...prev, bairro: e.target.value } : prev
+                        )
                       }
                     />
                   </div>
@@ -1560,7 +1964,9 @@ const ListaOrdensServico: React.FC = () => {
                       readOnly={readOnlyEditableFields}
                       value={detailsModalOs.rua ?? ""}
                       onChange={(e) =>
-                        setDetailsModalOs((prev) => (prev ? { ...prev, rua: e.target.value } : prev))
+                        setDetailsModalOs((prev) =>
+                          prev ? { ...prev, rua: e.target.value } : prev
+                        )
                       }
                     />
                   </div>
@@ -1572,7 +1978,9 @@ const ListaOrdensServico: React.FC = () => {
                       readOnly={readOnlyEditableFields}
                       value={detailsModalOs.numero ?? ""}
                       onChange={(e) =>
-                        setDetailsModalOs((prev) => (prev ? { ...prev, numero: e.target.value } : prev))
+                        setDetailsModalOs((prev) =>
+                          prev ? { ...prev, numero: e.target.value } : prev
+                        )
                       }
                     />
                   </div>
@@ -1601,7 +2009,9 @@ const ListaOrdensServico: React.FC = () => {
                     readOnly={readOnlyEditableFields}
                     value={detailsModalOs.observacoes ?? ""}
                     onChange={(e) =>
-                      setDetailsModalOs((prev) => (prev ? { ...prev, observacoes: e.target.value } : prev))
+                      setDetailsModalOs((prev) =>
+                        prev ? { ...prev, observacoes: e.target.value } : prev
+                      )
                     }
                   />
                 </div>
@@ -1610,7 +2020,11 @@ const ListaOrdensServico: React.FC = () => {
               <div className="page-section">
                 <h3>Fotos da abertura da OS (Operador)</h3>
                 <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", flexWrap: "wrap" }}>
-                  <button type="button" className="btn-secondary" onClick={() => openPhotoModalFromDetails("abertura")}>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => openPhotoModalFromDetails("abertura")}
+                  >
                     Ver fotos cadastradas
                     {fotosAberturaDetalhes.length > 0 ? ` (${fotosAberturaDetalhes.length})` : ""}
                   </button>
@@ -1623,7 +2037,11 @@ const ListaOrdensServico: React.FC = () => {
               <div className="page-section">
                 <h3>Fotos da execução (Terceirizada)</h3>
                 <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", flexWrap: "wrap" }}>
-                  <button type="button" className="btn-secondary" onClick={() => openPhotoModalFromDetails("execucao")}>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => openPhotoModalFromDetails("execucao")}
+                  >
                     Ver fotos cadastradas
                     {fotosExecucaoDetalhes.length > 0 ? ` (${fotosExecucaoDetalhes.length})` : ""}
                   </button>
@@ -1637,13 +2055,47 @@ const ListaOrdensServico: React.FC = () => {
             </div>
 
             <div className="modal-footer">
-              <button type="button" className="btn-secondary" onClick={closeDetailsModal} disabled={savingDetails}>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={closeDetailsModal}
+                disabled={savingDetails}
+              >
                 Fechar
               </button>
 
               {canEditCurrent && isEditingDetails && (
-                <button type="button" className="btn-primary" onClick={handleSaveDetails} disabled={savingDetails}>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={handleSaveDetails}
+                  disabled={savingDetails}
+                >
                   {savingDetails ? "Salvando..." : "Salvar alterações"}
+                </button>
+              )}
+
+              {normalizeStatus(detailsModalOs.status) === "AGUARDANDO_SANEAR" ? (
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={handleRetomarSanear}
+                  disabled={savingDetails}
+                >
+                  {savingDetails ? "Atualizando..." : "SANEAR liberou (retomar)"}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => {
+                    setAguardandoMotivo("SERVICO_PREVIO");
+                    setAguardandoDescricao("");
+                    setAguardandoSanearOpen(true);
+                  }}
+                  disabled={savingDetails}
+                >
+                  Aguardando SANEAR
                 </button>
               )}
 
@@ -1661,151 +2113,160 @@ const ListaOrdensServico: React.FC = () => {
       )}
 
       {/* MODAL DE FOTOS */}
-      {photoModal && (() => {
-        const os = getOsFromPhotoModal(photoModal);
-        const fotos = getFotosFromModalState(photoModal);
-        const fotoAtual = fotos[photoModal.currentIndex] ?? fotos[0];
+      {photoModal &&
+        (() => {
+          const os = getOsFromPhotoModal(photoModal);
+          const fotos = getFotosFromModalState(photoModal);
+          const fotoAtual = fotos[photoModal.currentIndex] ?? fotos[0];
 
-        const totalAbertura = normalizeFotos(os?.fotos).length;
-        const totalExec = normalizeFotos(os?.fotosExecucao).length;
+          const totalAbertura = normalizeFotos(os?.fotos).length;
+          const totalExec = normalizeFotos(os?.fotosExecucao).length;
 
-        return (
-          <div className="modal-backdrop" onClick={closePhotoModal}>
-            <div className="modal modal-photo" onClick={(e) => e.stopPropagation()}>
-              <div className="modal-header">
-                <h3 className="modal-title">
-                  Fotos da OS {os?.ordemServico || os?.protocolo || os?.id || photoModal.osId}
-                </h3>
-                <button type="button" className="modal-close" onClick={closePhotoModal}>
-                  ×
-                </button>
-              </div>
+          return (
+            <div className="modal-backdrop" onClick={closePhotoModal}>
+              <div className="modal modal-photo" onClick={(e) => e.stopPropagation()}>
+                <div className="modal-header">
+                  <h3 className="modal-title">
+                    Fotos da OS {os?.ordemServico || os?.protocolo || os?.id || photoModal.osId}
+                  </h3>
+                  <button type="button" className="modal-close" onClick={closePhotoModal}>
+                    ×
+                  </button>
+                </div>
 
-              <div
-                style={{
-                  padding: "0.75rem 1rem 0.5rem",
-                  borderBottom: "1px solid #e5e7eb",
-                  display: "flex",
-                  gap: "0.5rem",
-                  flexWrap: "wrap",
-                }}
-              >
-                <button
-                  type="button"
-                  className={photoModal.tipo === "abertura" ? "btn-primary" : "btn-secondary"}
-                  onClick={() => setPhotoModal((prev) => (prev ? { ...prev, tipo: "abertura", currentIndex: 0 } : prev))}
-                  disabled={totalAbertura === 0}
+                <div
+                  style={{
+                    padding: "0.75rem 1rem 0.5rem",
+                    borderBottom: "1px solid #e5e7eb",
+                    display: "flex",
+                    gap: "0.5rem",
+                    flexWrap: "wrap",
+                  }}
                 >
-                  Fotos do Operador{totalAbertura > 0 ? ` (${totalAbertura})` : ""}
-                </button>
-
-                <button
-                  type="button"
-                  className={photoModal.tipo === "execucao" ? "btn-primary" : "btn-secondary"}
-                  onClick={() => setPhotoModal((prev) => (prev ? { ...prev, tipo: "execucao", currentIndex: 0 } : prev))}
-                  disabled={totalExec === 0}
-                >
-                  Fotos da Terceirizada{totalExec > 0 ? ` (${totalExec})` : ""}
-                </button>
-              </div>
-
-              <div className="modal-body modal-photo-body">
-                {!os && <p className="field-hint">OS não encontrada (atualize a página).</p>}
-
-                {os && fotos.length === 0 && (
-                  <p className="field-hint">
-                    {photoModal.tipo === "abertura"
-                      ? "Nenhuma foto cadastrada pelo operador para esta OS."
-                      : "Nenhuma foto cadastrada pela terceirizada para esta OS."}
-                  </p>
-                )}
-
-                {os && fotos.length > 0 && fotoAtual && (
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "1rem" }}>
-                    {fotos.length > 1 && (
-                      <button type="button" className="btn-secondary" onClick={goToPrevPhoto}>
-                        ←
-                      </button>
-                    )}
-
-                    <div style={{ maxWidth: "100%", width: "100%", textAlign: "center" }}>
-                      <img
-                        src={fotoAtual.url}
-                        alt={fotoAtual.label}
-                        style={{
-                          width: "100%",
-                          maxHeight: "70vh",
-                          objectFit: "contain",
-                          borderRadius: "0.75rem",
-                        }}
-                      />
-                      <p className="photo-modal-timestamp">
-                        {fotoAtual.label}
-                        {fotos.length > 1 && (
-                          <>
-                            {" "}
-                            · Foto {photoModal.currentIndex + 1} de {fotos.length}
-                          </>
-                        )}
-                      </p>
-                    </div>
-
-                    {fotos.length > 1 && (
-                      <button type="button" className="btn-secondary" onClick={goToNextPhoto}>
-                        →
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              <div
-                className="modal-footer"
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  gap: "0.75rem",
-                  flexWrap: "wrap",
-                }}
-              >
-                <div style={{ display: "flex", gap: "0.5rem" }}>
-                  <button type="button" className="btn-secondary" onClick={closePhotoModal}>
-                    Fechar
+                  <button
+                    type="button"
+                    className={photoModal.tipo === "abertura" ? "btn-primary" : "btn-secondary"}
+                    onClick={() =>
+                      setPhotoModal((prev) =>
+                        prev ? { ...prev, tipo: "abertura", currentIndex: 0 } : prev
+                      )
+                    }
+                    disabled={totalAbertura === 0}
+                  >
+                    Fotos do Operador{totalAbertura > 0 ? ` (${totalAbertura})` : ""}
                   </button>
 
-                  {os && fotos.length > 0 && (
-                    <button type="button" className="btn-primary" onClick={handlePrintCurrentPhoto}>
-                      Imprimir
-                    </button>
+                  <button
+                    type="button"
+                    className={photoModal.tipo === "execucao" ? "btn-primary" : "btn-secondary"}
+                    onClick={() =>
+                      setPhotoModal((prev) =>
+                        prev ? { ...prev, tipo: "execucao", currentIndex: 0 } : prev
+                      )
+                    }
+                    disabled={totalExec === 0}
+                  >
+                    Fotos da Terceirizada{totalExec > 0 ? ` (${totalExec})` : ""}
+                  </button>
+                </div>
+
+                <div className="modal-body modal-photo-body">
+                  {!os && <p className="field-hint">OS não encontrada (atualize a página).</p>}
+
+                  {os && fotos.length === 0 && (
+                    <p className="field-hint">
+                      {photoModal.tipo === "abertura"
+                        ? "Nenhuma foto cadastrada pelo operador para esta OS."
+                        : "Nenhuma foto cadastrada pela terceirizada para esta OS."}
+                    </p>
                   )}
 
-                  {os && canEditOs(os) && fotos.length > 0 && (
-                    <button type="button" className="btn-primary btn-danger" onClick={handleDeleteCurrentPhoto}>
-                      Excluir foto
-                    </button>
+                  {os && fotos.length > 0 && fotoAtual && (
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "1rem" }}>
+                      {fotos.length > 1 && (
+                        <button type="button" className="btn-secondary" onClick={goToPrevPhoto}>
+                          ←
+                        </button>
+                      )}
+
+                      <div style={{ maxWidth: "100%", width: "100%", textAlign: "center" }}>
+                        <img
+                          src={fotoAtual.url}
+                          alt={fotoAtual.label}
+                          style={{
+                            width: "100%",
+                            maxHeight: "70vh",
+                            objectFit: "contain",
+                            borderRadius: "0.75rem",
+                          }}
+                        />
+                        <p className="photo-modal-timestamp">
+                          {fotoAtual.label}
+                          {fotos.length > 1 && (
+                            <>
+                              {" "}
+                              · Foto {photoModal.currentIndex + 1} de {fotos.length}
+                            </>
+                          )}
+                        </p>
+                      </div>
+
+                      {fotos.length > 1 && (
+                        <button type="button" className="btn-secondary" onClick={goToNextPhoto}>
+                          →
+                        </button>
+                      )}
+                    </div>
                   )}
                 </div>
 
-                {os && canEditOs(os) && (
-                  <div>
-                    <input
-                      ref={addPhotoInputRef}
-                      type="file"
-                      accept="image/*"
-                      multiple
-                      style={{ display: "none" }}
-                      onChange={handleAddPhotosChange}
-                    />
-                    <button type="button" className="btn-primary" onClick={triggerAddPhotos}>
-                      Adicionar fotos
+                <div
+                  className="modal-footer"
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    gap: "0.75rem",
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <div style={{ display: "flex", gap: "0.5rem" }}>
+                    <button type="button" className="btn-secondary" onClick={closePhotoModal}>
+                      Fechar
                     </button>
+
+                    {os && fotos.length > 0 && (
+                      <button type="button" className="btn-primary" onClick={handlePrintCurrentPhoto}>
+                        Imprimir
+                      </button>
+                    )}
+
+                    {os && canEditOs(os) && fotos.length > 0 && (
+                      <button type="button" className="btn-primary btn-danger" onClick={handleDeleteCurrentPhoto}>
+                        Excluir foto
+                      </button>
+                    )}
                   </div>
-                )}
+
+                  {os && canEditOs(os) && (
+                    <div>
+                      <input
+                        ref={addPhotoInputRef}
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        style={{ display: "none" }}
+                        onChange={handleAddPhotosChange}
+                      />
+                      <button type="button" className="btn-primary" onClick={triggerAddPhotos}>
+                        Adicionar fotos
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
-          </div>
-        );
-      })()}
+          );
+        })()}
     </section>
   );
 };
