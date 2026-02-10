@@ -9,8 +9,8 @@ import {
   updateDoc,
   doc,
   serverTimestamp,
+  Timestamp,
 } from "firebase/firestore";
-import type { Timestamp } from "firebase/firestore";
 import { db } from "../lib/firebaseClient";
 import { supabase } from "../lib/supabaseClient";
 import {
@@ -77,6 +77,21 @@ const tipoBadgeClassMap: Record<string, string> = {
   ASFALTO: "os-badge os-badge-asfalto",
 };
 
+
+const MOTIVOS_SANEAR: Array<{ value: string; label: string }> = [
+  { value: "SERVICO_PREVIO", label: "Precisa de serviço prévio da SANEAR" },
+  { value: "BLOQUEIO_ACESSO", label: "Bloqueio de acesso / chave / autorização" },
+  { value: "MATERIAL_SANEAR", label: "Falta de material/insumo da SANEAR" },
+  { value: "INTERDICAO_SEGURANCA", label: "Interdição / risco / segurança" },
+  { value: "OUTRO", label: "Outro" },
+];
+
+function isAguardandoSanear(status?: string | null): boolean {
+  const s = (status || "").toUpperCase();
+  return s === "AGUARDANDO_SANEAR" || s === "AGUARDANDO SANEAR";
+}
+
+
 function isDoneStatus(status?: string | null): boolean {
   const s = (status || "").toUpperCase();
   return s === "CONCLUIDA" || s === "CONCLUIDO";
@@ -89,6 +104,9 @@ function statusClass(status?: string | null): string {
   }
   if (s === "ANDAMENTO" || s === "EM_ANDAMENTO") {
     return "os-status-badge os-status-andamento";
+  }
+  if (s === "AGUARDANDO_SANEAR" || s === "AGUARDANDO SANEAR") {
+    return "os-status-badge os-status-aguardando";
   }
   if (s === "CANCELADA" || s === "CANCELADO") {
     return "os-status-badge os-status-cancelada";
@@ -111,6 +129,15 @@ function formatCreatedAt(createdAt?: Timestamp | null): string {
     return "-";
   }
 }
+
+function anyToDate(value: any): Date | null {
+  if (!value) return null;
+  if (value instanceof Date) return value;
+  if (typeof value?.toDate === "function") return value.toDate();
+  return null;
+}
+
+
 
 
 // ===== SLA: cálculo de SLA ÚTIL (padrão 72h) (sábado/domingo não contam) =====
@@ -431,6 +458,11 @@ const TerceirizadaVisao: React.FC = () => {
             createdAt: raw.createdAt ?? null,
             createdByEmail: raw.createdByEmail ?? null,
             dataExecucao: raw.dataExecucao ?? null,
+// SLA (72h) + pausas (SANEAR)
+slaHoras: typeof raw.slaHoras === "number" ? raw.slaHoras : null,
+slaPausas: Array.isArray(raw.slaPausas) ? raw.slaPausas : null,
+statusAntesAguardandoSanear: raw.statusAntesAguardandoSanear ?? null,
+
             ordemServicoPdfBase64:
               raw.ordemServicoPdfBase64 ?? pdfNested?.base64 ?? null,
             ordemServicoPdfNomeArquivo:
@@ -500,6 +532,11 @@ const TerceirizadaVisao: React.FC = () => {
             createdAt: raw.createdAt ?? null,
             createdByEmail: raw.createdByEmail ?? null,
             dataExecucao: raw.dataExecucao ?? null,
+// SLA (72h) + pausas (SANEAR)
+slaHoras: typeof raw.slaHoras === "number" ? raw.slaHoras : null,
+slaPausas: Array.isArray(raw.slaPausas) ? raw.slaPausas : null,
+statusAntesAguardandoSanear: raw.statusAntesAguardandoSanear ?? null,
+
             ordemServicoPdfBase64:
               raw.ordemServicoPdfBase64 ?? pdfNested?.base64 ?? null,
             ordemServicoPdfNomeArquivo:
@@ -669,6 +706,45 @@ const TerceirizadaVisao: React.FC = () => {
     return photosByOsId[modalOs.id] || [];
   }, [modalOs, photosByOsId]);
 
+// Pausa SANEAR ativa (para exibir motivo/descrição quando estiver AGUARDANDO_SANEAR)
+const sanearPausaAtiva = useMemo(() => {
+  if (!modalOs) return null;
+
+  const pausas = (modalOs.slaPausas || []) as any[];
+  for (let i = pausas.length - 1; i >= 0; i--) {
+    const p = pausas[i];
+    if (!p) continue;
+
+    const tipo = String(p.tipo || "").toUpperCase();
+    if (tipo !== "SANEAR") continue;
+
+    // ativa = sem fim
+    if (p.fimEm) continue;
+
+    const motivo = String(p.motivo || "");
+    const descricao = String(p.descricao || "");
+    const inicio = anyToDate(p.inicioEm);
+
+    const motivoLabel =
+      MOTIVOS_SANEAR.find((m) => m.value === motivo)?.label || motivo || "-";
+
+    const inicioTexto = inicio
+      ? inicio.toLocaleString("pt-BR", {
+          day: "2-digit",
+          month: "2-digit",
+          year: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        })
+      : "-";
+
+    return { motivo, motivoLabel, descricao, inicioTexto };
+  }
+
+  return null;
+}, [modalOs]);
+
+
   const totalAbertas = ordens.filter((os) => !isDoneStatus(os.status)).length;
   const totalConcluidas = ordens.filter((os) =>
     isDoneStatus(os.status)
@@ -807,9 +883,11 @@ async function handleMarcarAguardandoSanear() {
       (statusAtual && statusAtual !== "AGUARDANDO_SANEAR" ? statusAtual : "ABERTA");
 
     const pausasAtualizadas = upsertSanearPause(modalOs.slaPausas, {
+      tipo: "SANEAR",
       motivo: aguardandoMotivo,
       descricao,
-      inicioEm: serverTimestamp(),
+      inicioEm: Timestamp.now(),
+      fimEm: null,
     });
 
     await updateDoc(doc(db, collectionName, modalOs.id), {
@@ -852,7 +930,7 @@ async function handleRetomarSanear() {
     const collectionName =
       modalOs.origem === "asfalto" ? "ordensServico" : "ordens_servico";
 
-    const pausasFechadas = closeSanearPause(modalOs.slaPausas, serverTimestamp());
+    const pausasFechadas = closeSanearPause(modalOs.slaPausas, Timestamp.now());
     const novoStatus = modalOs.statusAntesAguardandoSanear || "ABERTA";
 
     await updateDoc(doc(db, collectionName, modalOs.id), {
@@ -1535,6 +1613,51 @@ async function handleServicoExecutado() {
                     readOnly
                   />
                 </div>
+
+{isAguardandoSanear(modalOs.status) && (
+  <div className="page-section" style={{ gridColumn: "1 / -1" }}>
+    <h3 style={{ marginTop: 0 }}>Aguardando SANEAR</h3>
+
+    {sanearPausaAtiva ? (
+      <>
+        <div className="page-form-grid" style={{ marginTop: "0.4rem" }}>
+          <div className="page-field">
+            <label>Motivo</label>
+            <input
+              className="field-readonly"
+              value={sanearPausaAtiva.motivoLabel}
+              readOnly
+            />
+          </div>
+
+          <div className="page-field">
+            <label>Desde</label>
+            <input
+              className="field-readonly"
+              value={sanearPausaAtiva.inicioTexto}
+              readOnly
+            />
+          </div>
+        </div>
+
+        <div className="page-field" style={{ marginTop: "0.4rem" }}>
+          <label>Descrição</label>
+          <textarea
+            className="field-readonly"
+            value={sanearPausaAtiva.descricao || "-"}
+            readOnly
+            rows={3}
+          />
+        </div>
+      </>
+    ) : (
+      <p className="page-section-description" style={{ marginTop: "0.4rem" }}>
+        Esta OS está como <strong>AGUARDANDO SANEAR</strong>, mas não encontrei o motivo salvo.
+      </p>
+    )}
+  </div>
+)}
+
 
                 <div className="page-field">
                   <label>Endereço</label>

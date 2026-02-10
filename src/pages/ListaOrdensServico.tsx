@@ -63,7 +63,7 @@ type FirestoreOS = {
 
 type StatusType = "success" | "error" | "info";
 
-type StatusFiltroOs = "TODAS" | "ABERTAS" | "FECHADAS";
+type StatusFiltroOs = "TODAS" | "ABERTAS" | "AGUARDANDO_SANEAR" | "FECHADAS";
 type OrdenacaoCampoOs = "createdAt" | "dataExecucao";
 type OrdenacaoDirecaoOs = "asc" | "desc";
 
@@ -559,6 +559,12 @@ const ListaOrdensServico: React.FC = () => {
     return false;
   }
 
+  function isAguardandoSanearStatus(status?: string | null): boolean {
+    const s = String(status ?? "").trim().toUpperCase();
+    return s === "AGUARDANDO_SANEAR" || s === "AGUARDANDO SANEAR";
+  }
+
+
   function isSameLocalDate(
     ts: Timestamp | null | undefined,
     yyyyMmDd: string
@@ -612,6 +618,9 @@ const ListaOrdensServico: React.FC = () => {
 
     if (filtroStatus !== "TODAS") {
       lista = lista.filter((os) => {
+        if (filtroStatus === "AGUARDANDO_SANEAR") {
+          return isAguardandoSanearStatus(os.status);
+        }
         const fechada = isOsFechada(os);
         return filtroStatus === "ABERTAS" ? !fechada : fechada;
       });
@@ -911,9 +920,10 @@ async function handleMarcarAguardandoSanear() {
       (statusAtual && statusAtual !== "AGUARDANDO_SANEAR" ? statusAtual : "ABERTA");
 
     const pausasAtualizadas = upsertSanearPause(detailsModalOs.slaPausas, {
+      tipo: "SANEAR",
       motivo: aguardandoMotivo,
       descricao,
-      inicioEm: serverTimestamp(),
+      inicioEm: new Date(),
     });
 
     await updateDoc(doc(db, collectionName, detailsModalOs.id), {
@@ -956,7 +966,7 @@ async function handleRetomarSanear() {
     const collectionName =
       detailsModalOs.origem === "asfalto" ? "ordensServico" : "ordens_servico";
 
-    const pausasFechadas = closeSanearPause(detailsModalOs.slaPausas, serverTimestamp());
+    const pausasFechadas = closeSanearPause(detailsModalOs.slaPausas, new Date());
     const novoStatus = detailsModalOs.statusAntesAguardandoSanear || "ABERTA";
 
     await updateDoc(doc(db, collectionName, detailsModalOs.id), {
@@ -1625,6 +1635,7 @@ async function handleSaveDetails() {
             >
               <option value="TODAS">Todas</option>
               <option value="ABERTAS">Abertas</option>
+              <option value="AGUARDANDO_SANEAR">Aguardando SANEAR</option>
               <option value="FECHADAS">Fechadas</option>
             </select>
           </div>
