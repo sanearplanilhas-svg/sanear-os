@@ -1,0 +1,102 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function estaLogado() {
+      return request.auth != null;
+    }
+
+    function perfilExiste() {
+      return estaLogado() &&
+        exists(/databases/$(database)/documents/usuarios_sistema/$(request.auth.uid));
+    }
+
+    function perfil() {
+      return get(
+        /databases/$(database)/documents/usuarios_sistema/$(request.auth.uid)
+      ).data;
+    }
+
+    function papel() {
+      return perfilExiste() ? perfil().role : null;
+    }
+
+    function ehAdm() {
+      return papel() == "adm";
+    }
+
+    function ehDiretor() {
+      return papel() == "diretor";
+    }
+
+    function ehOperador() {
+      return papel() == "operador";
+    }
+
+    function ehTerceirizada() {
+      return papel() == "terceirizada";
+    }
+
+    function podeCadastrarOrdem() {
+      return ehAdm() || ehDiretor() || ehOperador();
+    }
+
+    function ehCriadorDaOrdem() {
+      return resource.data.createdByUid == request.auth.uid;
+    }
+
+    function criadorInformadoCorretamente() {
+      return request.resource.data.createdByUid == request.auth.uid;
+    }
+
+    match /usuarios_sistema/{userId} {
+      allow read: if estaLogado() &&
+        (request.auth.uid == userId || ehAdm());
+
+      // O primeiro administrador deve ser criado manualmente pelo Console Firebase.
+      // Depois disso, somente um administrador pode cadastrar novos perfis.
+      allow create: if ehAdm();
+
+      // O administrador pode alterar perfis. O próprio usuário só pode atualizar
+      // dados pessoais sem mudar UID, e-mail ou papel de acesso.
+      allow update: if ehAdm() || (
+        estaLogado() &&
+        request.auth.uid == userId &&
+        request.resource.data.uid == resource.data.uid &&
+        request.resource.data.email == resource.data.email &&
+        request.resource.data.role == resource.data.role
+      );
+
+      allow delete: if ehAdm() && request.auth.uid != userId;
+    }
+
+    match /ordens_servico/{ordemId} {
+      allow read: if estaLogado();
+
+      allow create: if podeCadastrarOrdem() &&
+        criadorInformadoCorretamente();
+
+      allow update: if ehAdm() || ehDiretor() || ehTerceirizada() ||
+        (ehOperador() && ehCriadorDaOrdem());
+
+      allow delete: if ehAdm();
+    }
+
+    match /ordensServico/{ordemId} {
+      allow read: if estaLogado();
+
+      allow create: if podeCadastrarOrdem() &&
+        criadorInformadoCorretamente();
+
+      allow update: if ehAdm() || ehDiretor() || ehTerceirizada() ||
+        (ehOperador() && ehCriadorDaOrdem());
+
+      allow delete: if ehAdm();
+    }
+
+    match /{documento=**} {
+      allow read, write: if false;
+    }
+  }
+}

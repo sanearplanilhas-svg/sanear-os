@@ -1,13 +1,27 @@
-// src/lib/supabaseClient.ts
-import { createClient } from '@supabase/supabase-js'
+import { createClient } from "@supabase/supabase-js";
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-if (!supabaseUrl || !supabaseAnonKey) {
+const camposAusentes = [
+  ["VITE_SUPABASE_URL", supabaseUrl],
+  ["VITE_SUPABASE_ANON_KEY", supabaseAnonKey],
+]
+  .filter(([, valor]) => !valor?.trim())
+  .map(([nome]) => nome);
+
+if (camposAusentes.length > 0) {
   throw new Error(
-    'Supabase URL ou ANON KEY não definidos. Verifique o arquivo .env.local.'
-  )
+    `Configuração do Supabase incompleta. Variáveis ausentes: ${camposAusentes.join(
+      ", "
+    )}. Verifique o arquivo .env.local.`
+  );
 }
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey)
+export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+  auth: {
+    persistSession: false,
+    autoRefreshToken: false,
+    detectSessionInUrl: false,
+  },
+});

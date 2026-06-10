@@ -20,6 +20,7 @@ import {
   SLA_HORAS_PADRAO,
   MS_POR_HORA,
 } from "../lib/sla";
+import "./TerceirizadaVisao.css";
 
 // bucket do Supabase onde as OS estão sendo gravadas
 const STORAGE_BUCKET = "os-arquivos";
@@ -77,41 +78,60 @@ const tipoBadgeClassMap: Record<string, string> = {
   ASFALTO: "os-badge os-badge-asfalto",
 };
 
-
-const MOTIVOS_SANEAR: Array<{ value: string; label: string }> = [
-  { value: "SERVICO_PREVIO", label: "Precisa de serviço prévio da SANEAR" },
-  { value: "BLOQUEIO_ACESSO", label: "Bloqueio de acesso / chave / autorização" },
-  { value: "MATERIAL_SANEAR", label: "Falta de material/insumo da SANEAR" },
-  { value: "INTERDICAO_SEGURANCA", label: "Interdição / risco / segurança" },
-  { value: "OUTRO", label: "Outro" },
-];
-
-function isAguardandoSanear(status?: string | null): boolean {
-  const s = (status || "").toUpperCase();
-  return s === "AGUARDANDO_SANEAR" || s === "AGUARDANDO SANEAR";
+function normalizeStatusValue(status?: string | null): string {
+  return String(status ?? "").trim().toUpperCase();
 }
 
-
 function isDoneStatus(status?: string | null): boolean {
-  const s = (status || "").toUpperCase();
+  const s = normalizeStatusValue(status);
   return s === "CONCLUIDA" || s === "CONCLUIDO";
 }
 
+function isCanceledStatus(status?: string | null): boolean {
+  const s = normalizeStatusValue(status);
+  return s === "CANCELADA" || s === "CANCELADO";
+}
+
+function isWaitingSanearStatus(status?: string | null): boolean {
+  return normalizeStatusValue(status) === "AGUARDANDO_SANEAR";
+}
+
+function isOpenStatus(status?: string | null): boolean {
+  return !isDoneStatus(status) && !isCanceledStatus(status);
+}
+
 function statusClass(status?: string | null): string {
-  const s = (status || "").toUpperCase();
+  const s = normalizeStatusValue(status);
   if (s === "CONCLUIDA" || s === "CONCLUIDO") {
     return "os-status-badge os-status-concluida";
   }
   if (s === "ANDAMENTO" || s === "EM_ANDAMENTO") {
     return "os-status-badge os-status-andamento";
   }
-  if (s === "AGUARDANDO_SANEAR" || s === "AGUARDANDO SANEAR") {
-    return "os-status-badge os-status-aguardando";
+  if (s === "AGUARDANDO_SANEAR") {
+    return "os-status-badge os-status-aguardando-sanear";
   }
   if (s === "CANCELADA" || s === "CANCELADO") {
     return "os-status-badge os-status-cancelada";
   }
   return "os-status-badge os-status-aberta";
+}
+
+function formatStatusLabel(status?: string | null): string {
+  const s = normalizeStatusValue(status);
+
+  const labels: Record<string, string> = {
+    ABERTA: "ABERTA",
+    ANDAMENTO: "EM ANDAMENTO",
+    EM_ANDAMENTO: "EM ANDAMENTO",
+    AGUARDANDO_SANEAR: "AGUARDANDO SANEAR",
+    CONCLUIDA: "CONCLUÍDA",
+    CONCLUIDO: "CONCLUÍDA",
+    CANCELADA: "CANCELADA",
+    CANCELADO: "CANCELADA",
+  };
+
+  return labels[s] || s.replaceAll("_", " ") || "ABERTA";
 }
 
 function formatCreatedAt(createdAt?: Timestamp | null): string {
@@ -129,15 +149,6 @@ function formatCreatedAt(createdAt?: Timestamp | null): string {
     return "-";
   }
 }
-
-function anyToDate(value: any): Date | null {
-  if (!value) return null;
-  if (value instanceof Date) return value;
-  if (typeof value?.toDate === "function") return value.toDate();
-  return null;
-}
-
-
 
 
 // ===== SLA: cálculo de SLA ÚTIL (padrão 72h) (sábado/domingo não contam) =====
@@ -176,6 +187,31 @@ function formatBusinessDuration(ms: number): string {
   if (days > 0) return `${days}d ${hours}h úteis`;
   if (totalHours > 0) return `${totalHours}h ${minutes}m úteis`;
   return `${minutes}m úteis`;
+}
+
+function getOpenSanearPause(pausas?: any[] | null): any | null {
+  if (!Array.isArray(pausas)) return null;
+  return (
+    pausas.find((pausa) => pausa?.tipo === "SANEAR" && !pausa?.fimEm) ?? null
+  );
+}
+
+function formatPauseReason(pausa: any | null): string {
+  if (!pausa) return "Aguardando uma ação da SANEAR";
+
+  const motivoMap: Record<string, string> = {
+    SERVICO_PREVIO: "Aguardando serviço prévio da SANEAR",
+    BLOQUEIO_ACESSO: "Acesso ao local bloqueado",
+    MATERIAL: "Aguardando material ou recurso",
+    INFORMACAO: "Aguardando informação da SANEAR",
+    OUTRO: "Aguardando ação da SANEAR",
+  };
+
+  const motivo = motivoMap[String(pausa.motivo ?? "").toUpperCase()];
+  const descricao = String(pausa.descricao ?? "").trim();
+
+  if (motivo && descricao) return `${motivo}: ${descricao}`;
+  return descricao || motivo || "Aguardando uma ação da SANEAR";
 }
 
 const generateLocalId = () =>
@@ -281,7 +317,7 @@ async function generateOsDataPdfUrl(os: FirestoreOS): Promise<string> {
     { label: "Rua / Avenida", value: os.rua || "-" },
     { label: "Número", value: os.numero || "-" },
     { label: "Ponto de referência", value: os.pontoReferencia || "-" },
-    { label: "Status", value: os.status || "ABERTA" },
+    { label: "Status", value: formatStatusLabel(os.status) },
     {
       label: "Data de criação",
       value: formatCreatedAt(os.createdAt),
@@ -366,7 +402,9 @@ const TerceirizadaVisao: React.FC = () => {
   const [ordensAsfalto, setOrdensAsfalto] = useState<FirestoreOS[]>([]);
 
   const [busca, setBusca] = useState("");
-  const [loading, setLoading] = useState(true);
+  const [loadingBuraco, setLoadingBuraco] = useState(true);
+  const [loadingAsfalto, setLoadingAsfalto] = useState(true);
+  const loading = loadingBuraco || loadingAsfalto;
 
   // ===== SLA (72h úteis) =====
   const [slaOpen, setSlaOpen] = useState(false);
@@ -458,11 +496,10 @@ const TerceirizadaVisao: React.FC = () => {
             createdAt: raw.createdAt ?? null,
             createdByEmail: raw.createdByEmail ?? null,
             dataExecucao: raw.dataExecucao ?? null,
-// SLA (72h) + pausas (SANEAR)
-slaHoras: typeof raw.slaHoras === "number" ? raw.slaHoras : null,
-slaPausas: Array.isArray(raw.slaPausas) ? raw.slaPausas : null,
-statusAntesAguardandoSanear: raw.statusAntesAguardandoSanear ?? null,
-
+            slaHoras: raw.slaHoras ?? null,
+            slaPausas: Array.isArray(raw.slaPausas) ? raw.slaPausas : [],
+            statusAntesAguardandoSanear:
+              raw.statusAntesAguardandoSanear ?? null,
             ordemServicoPdfBase64:
               raw.ordemServicoPdfBase64 ?? pdfNested?.base64 ?? null,
             ordemServicoPdfNomeArquivo:
@@ -473,11 +510,11 @@ statusAntesAguardandoSanear: raw.statusAntesAguardandoSanear ?? null,
           };
         });
         setOrdensBuraco(data);
-        setLoading(false);
+        setLoadingBuraco(false);
       },
       (err) => {
         console.error(err);
-        setLoading(false);
+        setLoadingBuraco(false);
         setInfoModal({
           title: "Erro ao carregar ordens",
           message:
@@ -532,11 +569,10 @@ statusAntesAguardandoSanear: raw.statusAntesAguardandoSanear ?? null,
             createdAt: raw.createdAt ?? null,
             createdByEmail: raw.createdByEmail ?? null,
             dataExecucao: raw.dataExecucao ?? null,
-// SLA (72h) + pausas (SANEAR)
-slaHoras: typeof raw.slaHoras === "number" ? raw.slaHoras : null,
-slaPausas: Array.isArray(raw.slaPausas) ? raw.slaPausas : null,
-statusAntesAguardandoSanear: raw.statusAntesAguardandoSanear ?? null,
-
+            slaHoras: raw.slaHoras ?? null,
+            slaPausas: Array.isArray(raw.slaPausas) ? raw.slaPausas : [],
+            statusAntesAguardandoSanear:
+              raw.statusAntesAguardandoSanear ?? null,
             ordemServicoPdfBase64:
               raw.ordemServicoPdfBase64 ?? pdfNested?.base64 ?? null,
             ordemServicoPdfNomeArquivo:
@@ -547,11 +583,11 @@ statusAntesAguardandoSanear: raw.statusAntesAguardandoSanear ?? null,
           };
         });
         setOrdensAsfalto(data);
-        setLoading(false);
+        setLoadingAsfalto(false);
       },
       (err) => {
         console.error(err);
-        setLoading(false);
+        setLoadingAsfalto(false);
         setInfoModal({
           title: "Erro ao carregar ordens",
           message:
@@ -571,66 +607,84 @@ statusAntesAguardandoSanear: raw.statusAntesAguardandoSanear ?? null,
     return [...ordensBuraco, ...ordensAsfalto];
   }, [ordensBuraco, ordensAsfalto]);
 
-  // ===== SLA: OS em aberto acima de 72h úteis (seg–sex) =====
+  // ===== SLA: prazo de atendimento (segunda a sexta) =====
   const slaSnapshot = useMemo(() => {
     const now = new Date(nowTick);
 
     const abertas = ordens.filter(
-      (os) => !isDoneStatus(os.status) && !!os.createdAt
+      (os) => isOpenStatus(os.status) && !!os.createdAt
     );
 
-    const toJsDate = (v: any): Date | null => {
-      if (!v) return null;
-      if (v instanceof Date) return v;
-      if (typeof v?.toDate === "function") return v.toDate() as Date;
+    const toJsDate = (value: any): Date | null => {
+      if (!value) return null;
+      if (value instanceof Date) return value;
+      if (typeof value?.toDate === "function") return value.toDate() as Date;
       return null;
     };
 
-    const list = abertas
-      .map((os) => {
-        const created = os.createdAt ? os.createdAt.toDate() : null;
+    const list = abertas.map((os) => {
+      const created = os.createdAt ? os.createdAt.toDate() : null;
+      const baseMs = created ? businessMsBetween(created, now) : 0;
+      const pausas = Array.isArray(os.slaPausas) ? os.slaPausas : [];
 
-        const baseMs = created ? businessMsBetween(created, now) : 0;
+      let pausadoMs = 0;
 
-        // Desconta pausas SANEAR (SLA pausado)
-        const pausas = Array.isArray((os as any).slaPausas)
-          ? ((os as any).slaPausas as any[])
-          : [];
+      for (const pausa of pausas) {
+        if (pausa?.tipo !== "SANEAR") continue;
 
-        let pausadoMs = 0;
+        const inicio = toJsDate(pausa?.inicioEm);
+        if (!inicio) continue;
 
-        for (const p of pausas) {
-          if (p?.tipo !== "SANEAR") continue;
-          const ini = toJsDate(p?.inicioEm);
-          if (!ini) continue;
-          const fim = toJsDate(p?.fimEm) ?? now;
-          pausadoMs += businessMsBetween(ini, fim);
-        }
+        const fim = toJsDate(pausa?.fimEm) ?? now;
+        pausadoMs += businessMsBetween(inicio, fim);
+      }
 
-        const ageMs = Math.max(0, baseMs - pausadoMs);
+      const ageMs = Math.max(0, baseMs - pausadoMs);
+      const slaHoras =
+        typeof os.slaHoras === "number" && os.slaHoras > 0
+          ? os.slaHoras
+          : SLA_HORAS_PADRAO;
+      const slaMs = slaHoras * MS_POR_HORA;
+      const isPaused =
+        isWaitingSanearStatus(os.status) || hasOpenSanearPause(os.slaPausas);
+      const progressPercent =
+        slaMs > 0 ? Math.min(100, Math.round((ageMs / slaMs) * 100)) : 0;
 
-        const slaHoras =
-          typeof (os as any).slaHoras === "number" && (os as any).slaHoras > 0
-            ? ((os as any).slaHoras as number)
-            : SLA_HORAS_PADRAO;
+      return {
+        os,
+        ageMs,
+        slaHoras,
+        slaMs,
+        isPaused,
+        progressPercent,
+        remainingMs: Math.max(0, slaMs - ageMs),
+        overdueByMs: Math.max(0, ageMs - slaMs),
+      };
+    });
 
-        const slaMs = slaHoras * MS_POR_HORA;
+    const active = list.filter((item) => !item.isPaused);
 
-        return { os, ageMs, slaHoras, slaMs };
-      })
-      .filter((x) => x.ageMs > 0);
+    const overdue = active
+      .filter((item) => item.ageMs >= item.slaMs)
+      .sort((a, b) => b.overdueByMs - a.overdueByMs);
 
-    const overdue = list
-      .filter((x) => x.ageMs >= x.slaMs)
-      .sort((a, b) => b.ageMs - a.ageMs);
+    const nearDue = active
+      .filter(
+        (item) => item.ageMs >= item.slaMs * 0.75 && item.ageMs < item.slaMs
+      )
+      .sort((a, b) => a.remainingMs - b.remainingMs);
 
-    const nearDue = list
-      .filter((x) => x.ageMs >= x.slaMs * 0.75 && x.ageMs < x.slaMs)
+    const onTime = active.filter((item) => item.ageMs < item.slaMs * 0.75);
+
+    const paused = list
+      .filter((item) => item.isPaused)
       .sort((a, b) => b.ageMs - a.ageMs);
 
     return {
       overdue,
       nearDue,
+      onTime,
+      paused,
       totalOpen: abertas.length,
     };
   }, [ordens, nowTick]);
@@ -640,7 +694,7 @@ statusAntesAguardandoSanear: raw.statusAntesAguardandoSanear ?? null,
     return ordens.filter((os) => {
       if (statusTab === "ALL") return true;
       const done = isDoneStatus(os.status);
-      if (statusTab === "OPEN") return !done;
+      if (statusTab === "OPEN") return isOpenStatus(os.status);
       if (statusTab === "DONE") return done;
       return true;
     });
@@ -706,48 +760,12 @@ statusAntesAguardandoSanear: raw.statusAntesAguardandoSanear ?? null,
     return photosByOsId[modalOs.id] || [];
   }, [modalOs, photosByOsId]);
 
-// Pausa SANEAR ativa (para exibir motivo/descrição quando estiver AGUARDANDO_SANEAR)
-const sanearPausaAtiva = useMemo(() => {
-  if (!modalOs) return null;
-
-  const pausas = (modalOs.slaPausas || []) as any[];
-  for (let i = pausas.length - 1; i >= 0; i--) {
-    const p = pausas[i];
-    if (!p) continue;
-
-    const tipo = String(p.tipo || "").toUpperCase();
-    if (tipo !== "SANEAR") continue;
-
-    // ativa = sem fim
-    if (p.fimEm) continue;
-
-    const motivo = String(p.motivo || "");
-    const descricao = String(p.descricao || "");
-    const inicio = anyToDate(p.inicioEm);
-
-    const motivoLabel =
-      MOTIVOS_SANEAR.find((m) => m.value === motivo)?.label || motivo || "-";
-
-    const inicioTexto = inicio
-      ? inicio.toLocaleString("pt-BR", {
-          day: "2-digit",
-          month: "2-digit",
-          year: "numeric",
-          hour: "2-digit",
-          minute: "2-digit",
-        })
-      : "-";
-
-    return { motivo, motivoLabel, descricao, inicioTexto };
-  }
-
-  return null;
-}, [modalOs]);
-
-
-  const totalAbertas = ordens.filter((os) => !isDoneStatus(os.status)).length;
+  const totalAbertas = ordens.filter((os) => isOpenStatus(os.status)).length;
   const totalConcluidas = ordens.filter((os) =>
     isDoneStatus(os.status)
+  ).length;
+  const totalCanceladas = ordens.filter((os) =>
+    isCanceledStatus(os.status)
   ).length;
 
   function handleOpenOsModal(os: FirestoreOS) {
@@ -761,13 +779,6 @@ const sanearPausaAtiva = useMemo(() => {
   }
 
   function handleOpenSlaDrawer() {
-    if (slaSnapshot.overdue.length === 0) {
-      setInfoModal({
-        title: "SLA em dia",
-        message: "Nenhuma OS em aberto ultrapassou 72h úteis (descontando pausas do SLA; sábado e domingo não contam).",
-      });
-      return;
-    }
     setSlaOpen(true);
   }
 
@@ -855,8 +866,8 @@ const sanearPausaAtiva = useMemo(() => {
   }
 
   function normalizeStatus(value: string | null | undefined): string {
-  return String(value ?? "").trim().toUpperCase();
-}
+    return normalizeStatusValue(value);
+  }
 
 
 async function handleMarcarAguardandoSanear() {
@@ -883,11 +894,9 @@ async function handleMarcarAguardandoSanear() {
       (statusAtual && statusAtual !== "AGUARDANDO_SANEAR" ? statusAtual : "ABERTA");
 
     const pausasAtualizadas = upsertSanearPause(modalOs.slaPausas, {
-      tipo: "SANEAR",
       motivo: aguardandoMotivo,
       descricao,
       inicioEm: Timestamp.now(),
-      fimEm: null,
     });
 
     await updateDoc(doc(db, collectionName, modalOs.id), {
@@ -1139,8 +1148,8 @@ async function handleServicoExecutado() {
           <span className="terceirizada-pill">VISÃO DA TERCEIRIZADA</span>
           <h2>Fila de atendimento unificada</h2>
           <p className="page-section-description">
-            Todas as OS de buraco, asfalto e esgoto em um só lugar. Ao concluir
-            o serviço, será solicitado pelo menos uma foto do local atendido.
+            Todas as OS de buraco e asfalto em um só lugar. Ao concluir o
+            serviço, será solicitada pelo menos uma foto do local atendido.
           </p>
         </div>
 
@@ -1153,6 +1162,34 @@ async function handleServicoExecutado() {
             alinhados com a data real da execução.
           </p>
         </div>
+      </div>
+
+      <div className="sla-explainer" role="note">
+        <div className="sla-explainer-icon" aria-hidden="true">
+          ⏱
+        </div>
+
+        <div className="sla-explainer-content">
+          <div className="sla-explainer-title">
+            O que é SLA?
+          </div>
+          <p className="sla-explainer-text">
+            SLA significa <strong>Acordo de Nível de Serviço</strong>. É o prazo
+            máximo definido para atendimento de uma OS. Neste sistema, o prazo
+            padrão é de <strong>{SLA_HORAS_PADRAO} horas úteis</strong>: a
+            contagem ocorre de segunda a sexta, em horas corridas; sábado e
+            domingo não contam. Quando a OS fica em “Aguardando SANEAR”, o
+            relógio do SLA é pausado até a liberação.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          className="sla-explainer-button"
+          onClick={handleOpenSlaDrawer}
+        >
+          Ver situação do SLA
+        </button>
       </div>
 
       {/* KPI cards rápidos */}
@@ -1181,7 +1218,9 @@ async function handleServicoExecutado() {
             <div className="os-kpi-value">{ordens.length}</div>
           </div>
           <span className="os-kpi-pill os-kpi-pill-neutral">
-            Atualizado em tempo real
+            {totalCanceladas > 0
+              ? `${totalCanceladas} cancelada(s)`
+              : "Atualizado em tempo real"}
           </span>
         </div>
 
@@ -1199,20 +1238,19 @@ async function handleServicoExecutado() {
               handleOpenSlaDrawer();
             }
           }}
-          title="OS em aberto acima de 72h úteis (sábado e domingo não contam)"
+          title="Abrir o acompanhamento do prazo de atendimento"
         >
           <div>
             <div className="os-kpi-label">
-              Alerta SLA (72h úteis)
-              {slaSnapshot.nearDue.length > 0 && (
-                <span className="os-kpi-subtle">
-                  {" "}
-                  • {slaSnapshot.nearDue.length} perto do limite
-                </span>
-              )}
+              Prazo de atendimento (SLA)
             </div>
             <div className="os-kpi-value">{slaSnapshot.overdue.length}</div>
+            <div className="sla-kpi-breakdown">
+              <span>{slaSnapshot.nearDue.length} em atenção</span>
+              <span>{slaSnapshot.paused.length} pausada(s)</span>
+            </div>
           </div>
+
           <span
             className={`os-kpi-pill ${
               slaSnapshot.overdue.length > 0
@@ -1220,9 +1258,12 @@ async function handleServicoExecutado() {
                 : "os-kpi-pill-success"
             }`}
           >
-            {slaSnapshot.overdue.length > 0 ? "Atrasadas" : "OK"}
+            {slaSnapshot.overdue.length > 0
+              ? `${slaSnapshot.overdue.length} atrasada(s)`
+              : "Dentro do prazo"}
           </span>
         </div>
+
       </div>
 
       {/* FILTROS + BUSCA */}
@@ -1376,7 +1417,7 @@ async function handleServicoExecutado() {
                       </div>
                       <div>
                         <span className={statusClass(os.status)}>
-                          {os.status || "ABERTA"}
+                          {formatStatusLabel(os.status)}
                         </span>
                       </div>
                     </div>
@@ -1396,7 +1437,7 @@ async function handleServicoExecutado() {
       </div>
 
 
-      {/* DRAWER – Alertas de SLA (72h úteis) */}
+      {/* DRAWER – acompanhamento do prazo de atendimento */}
       {slaOpen && (
         <div
           className="modal-backdrop sla-backdrop"
@@ -1405,10 +1446,10 @@ async function handleServicoExecutado() {
           <div className="sla-drawer" onClick={(e) => e.stopPropagation()}>
             <div className="sla-drawer-header">
               <div>
-                <h3 className="sla-title">Alertas de SLA</h3>
+                <h3 className="sla-title">Prazo de atendimento (SLA)</h3>
                 <p className="sla-subtitle">
-                  OS em aberto com <strong>mais de 72h úteis</strong> desde a
-                  criação (descontando pausas do SLA). <em>Sábado e domingo não contam.</em>
+                  Acompanhe as OS que estão dentro do prazo, próximas do limite,
+                  atrasadas ou com a contagem pausada.
                 </p>
               </div>
 
@@ -1416,102 +1457,244 @@ async function handleServicoExecutado() {
                 type="button"
                 className="modal-close"
                 onClick={() => setSlaOpen(false)}
-                aria-label="Fechar"
+                aria-label="Fechar acompanhamento do SLA"
               >
                 ×
               </button>
             </div>
 
             <div className="sla-drawer-body">
-              <div className="sla-metrics">
-                <div className="sla-metric">
+              <div className="sla-definition-box">
+                <div className="sla-definition-icon" aria-hidden="true">
+                  ⏱
+                </div>
+                <div>
+                  <strong>SLA é o prazo máximo para atender uma OS.</strong>
+                  <p>
+                    O prazo padrão é de {SLA_HORAS_PADRAO} horas úteis. A
+                    contagem ocorre de segunda a sexta, em horas corridas;
+                    sábado e domingo não contam. Quando a OS está em
+                    “Aguardando SANEAR”, o relógio fica pausado.
+                  </p>
+                </div>
+              </div>
+
+              <div className="sla-metrics sla-metrics-four">
+                <div className="sla-metric sla-metric-ok">
+                  <div className="sla-metric-label">Dentro do prazo</div>
+                  <div className="sla-metric-value">{slaSnapshot.onTime.length}</div>
+                </div>
+                <div className="sla-metric sla-metric-warning">
+                  <div className="sla-metric-label">Em atenção</div>
+                  <div className="sla-metric-value">{slaSnapshot.nearDue.length}</div>
+                </div>
+                <div className="sla-metric sla-metric-danger">
                   <div className="sla-metric-label">Atrasadas</div>
                   <div className="sla-metric-value">{slaSnapshot.overdue.length}</div>
                 </div>
-                <div className="sla-metric">
-                  <div className="sla-metric-label">Perto do limite</div>
-                  <div className="sla-metric-value">{slaSnapshot.nearDue.length}</div>
-                </div>
-                <div className="sla-metric">
-                  <div className="sla-metric-label">OS em aberto</div>
-                  <div className="sla-metric-value">{slaSnapshot.totalOpen}</div>
+                <div className="sla-metric sla-metric-paused">
+                  <div className="sla-metric-label">Pausadas</div>
+                  <div className="sla-metric-value">{slaSnapshot.paused.length}</div>
                 </div>
               </div>
 
-              <div className="sla-section">
-                <div className="sla-section-title">
-                  ⚠ Atrasadas (72h úteis+)
+              {slaSnapshot.totalOpen === 0 && (
+                <div className="sla-empty">
+                  Não há ordens de serviço abertas para acompanhamento.
                 </div>
+              )}
 
-                {slaSnapshot.overdue.length === 0 ? (
-                  <div className="sla-empty">
-                    Nenhuma OS atrasada no momento.
+              {slaSnapshot.overdue.length > 0 && (
+                <div className="sla-section">
+                  <div className="sla-section-title">
+                    ⚠ Atrasadas
                   </div>
-                ) : (
+                  <p className="sla-section-description">
+                    Estas OS ultrapassaram o prazo definido e devem ser
+                    priorizadas.
+                  </p>
+
                   <div className="sla-list">
-                    {slaSnapshot.overdue.map(({ os, ageMs }) => {
-                      const ident =
-                        os.ordemServico || os.protocolo || os.id;
+                    {slaSnapshot.overdue.map(
+                      ({
+                        os,
+                        ageMs,
+                        overdueByMs,
+                        progressPercent,
+                        slaHoras,
+                      }) => {
+                        const ident =
+                          os.ordemServico || os.protocolo || os.id;
+                        const address =
+                          [
+                            os.rua,
+                            os.numero ? "nº " + os.numero : "",
+                            os.bairro ? " – " + os.bairro : "",
+                          ]
+                            .filter(Boolean)
+                            .join(" ") || "Endereço não informado";
 
-                      const address =
-                        [os.rua, os.numero ? "nº " + os.numero : "", os.bairro ? " – " + os.bairro : ""]
-                          .filter(Boolean)
-                          .join(" ") || "Endereço não informado";
+                        return (
+                          <button
+                            key={`${os.origem}:${os.id}`}
+                            type="button"
+                            className="sla-item"
+                            onClick={() => navigateToListaOsHighlight(os)}
+                          >
+                            <div className="sla-item-content">
+                              <div className="sla-item-main">
+                                <div className="sla-item-ident">{ident}</div>
+                                <div className="sla-item-sub">
+                                  {address} • criada em{" "}
+                                  {formatCreatedAt(os.createdAt)}
+                                </div>
+                              </div>
 
-                      return (
-                        <button
-                          key={`${os.origem}:${os.id}`}
-                          type="button"
-                          className="sla-item"
-                          onClick={() => navigateToListaOsHighlight(os)}
-                        >
-                          <div className="sla-item-main">
-                            <div className="sla-item-ident">{ident}</div>
-                            <div className="sla-item-sub">
-                              {address} • criado em {formatCreatedAt(os.createdAt)}
+                              <div className="sla-item-side">
+                                <div className="sla-item-age">
+                                  Atrasada há{" "}
+                                  {formatBusinessDuration(overdueByMs)}
+                                </div>
+                                <div className="sla-item-limit">
+                                  {formatBusinessDuration(ageMs)} consumidas de{" "}
+                                  {slaHoras}h
+                                </div>
+                              </div>
                             </div>
-                          </div>
-                          <div className="sla-item-age">
-                            {formatBusinessDuration(ageMs)}
-                          </div>
-                        </button>
-                      );
-                    })}
+
+                            <div
+                              className="sla-progress sla-progress-danger"
+                              aria-label={`${progressPercent}% do prazo consumido`}
+                            >
+                              <span style={{ width: `${progressPercent}%` }} />
+                            </div>
+                          </button>
+                        );
+                      }
+                    )}
                   </div>
-                )}
-              </div>
+                </div>
+              )}
 
               {slaSnapshot.nearDue.length > 0 && (
                 <div className="sla-section">
                   <div className="sla-section-title">
-                    ⏳ Perto do limite (54–72h úteis)
+                    ⏳ Em atenção
                   </div>
+                  <p className="sla-section-description">
+                    Estas OS já consumiram pelo menos 75% do prazo.
+                  </p>
 
                   <div className="sla-list">
-                    {slaSnapshot.nearDue.map(({ os, ageMs }) => {
+                    {slaSnapshot.nearDue.map(
+                      ({
+                        os,
+                        ageMs,
+                        remainingMs,
+                        progressPercent,
+                        slaHoras,
+                      }) => {
+                        const ident =
+                          os.ordemServico || os.protocolo || os.id;
+                        const address =
+                          [
+                            os.rua,
+                            os.numero ? "nº " + os.numero : "",
+                            os.bairro ? " – " + os.bairro : "",
+                          ]
+                            .filter(Boolean)
+                            .join(" ") || "Endereço não informado";
+
+                        return (
+                          <button
+                            key={`${os.origem}:${os.id}`}
+                            type="button"
+                            className="sla-item sla-item-soon"
+                            onClick={() => navigateToListaOsHighlight(os)}
+                          >
+                            <div className="sla-item-content">
+                              <div className="sla-item-main">
+                                <div className="sla-item-ident">{ident}</div>
+                                <div className="sla-item-sub">
+                                  {address} • criada em{" "}
+                                  {formatCreatedAt(os.createdAt)}
+                                </div>
+                              </div>
+
+                              <div className="sla-item-side">
+                                <div className="sla-item-age">
+                                  Restam {formatBusinessDuration(remainingMs)}
+                                </div>
+                                <div className="sla-item-limit">
+                                  {formatBusinessDuration(ageMs)} consumidas de{" "}
+                                  {slaHoras}h
+                                </div>
+                              </div>
+                            </div>
+
+                            <div
+                              className="sla-progress sla-progress-warning"
+                              aria-label={`${progressPercent}% do prazo consumido`}
+                            >
+                              <span style={{ width: `${progressPercent}%` }} />
+                            </div>
+                          </button>
+                        );
+                      }
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {slaSnapshot.paused.length > 0 && (
+                <div className="sla-section">
+                  <div className="sla-section-title">
+                    ⏸ Aguardando SANEAR
+                  </div>
+                  <p className="sla-section-description">
+                    A contagem está parada e será retomada após a liberação da
+                    SANEAR.
+                  </p>
+
+                  <div className="sla-list">
+                    {slaSnapshot.paused.map(({ os, ageMs, slaHoras }) => {
                       const ident =
                         os.ordemServico || os.protocolo || os.id;
-
                       const address =
-                        [os.rua, os.numero ? "nº " + os.numero : "", os.bairro ? " – " + os.bairro : ""]
+                        [
+                          os.rua,
+                          os.numero ? "nº " + os.numero : "",
+                          os.bairro ? " – " + os.bairro : "",
+                        ]
                           .filter(Boolean)
                           .join(" ") || "Endereço não informado";
+                      const pausa = getOpenSanearPause(os.slaPausas);
 
                       return (
                         <button
                           key={`${os.origem}:${os.id}`}
                           type="button"
-                          className="sla-item sla-item-soon"
+                          className="sla-item sla-item-paused"
                           onClick={() => navigateToListaOsHighlight(os)}
                         >
-                          <div className="sla-item-main">
-                            <div className="sla-item-ident">{ident}</div>
-                            <div className="sla-item-sub">
-                              {address} • criado em {formatCreatedAt(os.createdAt)}
+                          <div className="sla-item-content">
+                            <div className="sla-item-main">
+                              <div className="sla-item-ident">{ident}</div>
+                              <div className="sla-item-sub">
+                                {address}
+                              </div>
+                              <div className="sla-item-reason">
+                                {formatPauseReason(pausa)}
+                              </div>
                             </div>
-                          </div>
-                          <div className="sla-item-age">
-                            {formatBusinessDuration(ageMs)}
+
+                            <div className="sla-item-side">
+                              <div className="sla-item-age">SLA pausado</div>
+                              <div className="sla-item-limit">
+                                {formatBusinessDuration(ageMs)} consumidas de{" "}
+                                {slaHoras}h
+                              </div>
+                            </div>
                           </div>
                         </button>
                       );
@@ -1519,6 +1702,15 @@ async function handleServicoExecutado() {
                   </div>
                 </div>
               )}
+
+              {slaSnapshot.overdue.length === 0 &&
+                slaSnapshot.nearDue.length === 0 &&
+                slaSnapshot.paused.length === 0 &&
+                slaSnapshot.totalOpen > 0 && (
+                  <div className="sla-empty sla-empty-success">
+                    Todas as OS abertas estão dentro do prazo de atendimento.
+                  </div>
+                )}
             </div>
 
             <div className="sla-drawer-footer">
@@ -1609,55 +1801,10 @@ async function handleServicoExecutado() {
                   <label>Status atual</label>
                   <input
                     className="field-readonly"
-                    value={modalOs.status || "ABERTA"}
+                    value={formatStatusLabel(modalOs.status)}
                     readOnly
                   />
                 </div>
-
-{isAguardandoSanear(modalOs.status) && (
-  <div className="page-section" style={{ gridColumn: "1 / -1" }}>
-    <h3 style={{ marginTop: 0 }}>Aguardando SANEAR</h3>
-
-    {sanearPausaAtiva ? (
-      <>
-        <div className="page-form-grid" style={{ marginTop: "0.4rem" }}>
-          <div className="page-field">
-            <label>Motivo</label>
-            <input
-              className="field-readonly"
-              value={sanearPausaAtiva.motivoLabel}
-              readOnly
-            />
-          </div>
-
-          <div className="page-field">
-            <label>Desde</label>
-            <input
-              className="field-readonly"
-              value={sanearPausaAtiva.inicioTexto}
-              readOnly
-            />
-          </div>
-        </div>
-
-        <div className="page-field" style={{ marginTop: "0.4rem" }}>
-          <label>Descrição</label>
-          <textarea
-            className="field-readonly"
-            value={sanearPausaAtiva.descricao || "-"}
-            readOnly
-            rows={3}
-          />
-        </div>
-      </>
-    ) : (
-      <p className="page-section-description" style={{ marginTop: "0.4rem" }}>
-        Esta OS está como <strong>AGUARDANDO SANEAR</strong>, mas não encontrei o motivo salvo.
-      </p>
-    )}
-  </div>
-)}
-
 
                 <div className="page-field">
                   <label>Endereço</label>

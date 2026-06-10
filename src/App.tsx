@@ -29,6 +29,7 @@ import TerceirizadaVisao from "./pages/TerceirizadaVisao";
 import Usuario from "./pages/Usuario";
 import Dashboard from "./pages/Dashboard";
 import ListaOrdensServico from "./pages/ListaOrdensServico";
+import Backup from "./pages/Backup";
 
 type MenuKey =
   | "dashboard"
@@ -39,7 +40,8 @@ type MenuKey =
   | "esgoto_retornando"
   | "terceirizada"
   | "usuario"
-  | "listaOS";
+  | "listaOS"
+  | "backup";
 
 type SimulatedRole = "diretor" | "operador" | "terceirizada" | "adm";
 
@@ -119,6 +121,8 @@ function getMenuMeta(menu: MenuKey): { title: string; section: string } {
       return { title: "Visão da Terceirizada", section: "Terceirizada" };
     case "usuario":
       return { title: "Usuário", section: "Configurações" };
+    case "backup":
+      return { title: "Backup", section: "Configurações" };
     default:
       return { title: "Sanear Operacional", section: "Setor Operacional" };
   }
@@ -606,6 +610,8 @@ useEffect(() => {
         return <Usuario />;
       case "listaOS":
         return <ListaOrdensServico />;
+      case "backup":
+        return <Backup />;
       default:
         return <Dashboard />;
     }
@@ -905,6 +911,17 @@ useEffect(() => {
               <span>Usuário</span>
               <small>Perfil &amp; Acesso</small>
             </button>
+
+            {simulatedRole === "adm" && (
+              <button
+                type="button"
+                className={`sidebar-link ${activeMenu === "backup" ? "active" : ""}`}
+                onClick={() => setActiveMenu("backup")}
+              >
+                <span>Backup</span>
+                <small>Histórico &amp; Limpeza</small>
+              </button>
+            )}
           </div>
         </div>
       </aside>

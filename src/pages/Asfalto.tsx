@@ -2,10 +2,14 @@ import React, { useState, type ChangeEvent, type FormEvent } from "react";
 import {
   collection,
   doc,
+  getDocs,
+  limit,
+  query,
   setDoc,
   serverTimestamp,
+  where,
 } from "firebase/firestore";
-import { db } from "../lib/firebaseClient";
+import { auth, db } from "../lib/firebaseClient";
 import { supabase } from "../lib/supabaseClient";
 
 import { SLA_HORAS_PADRAO } from "../lib/sla";
@@ -52,16 +56,6 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
   const [referencia, setReferencia] = useState("");
   const [observacoes, setObservacoes] = useState("");
 
-  const [naoDeclarado, setNaoDeclarado] = useState<Record<CampoForm, boolean>>({
-    protocolo: false,
-    ordemServico: false, // mantido no state, mas não usamos mais na UI
-    bairro: false,
-    rua: false,
-    numero: false,
-    referencia: false,
-    observacoes: false,
-  });
-
   const [fotos, setFotos] = useState<FotoAnexada[]>([]);
   const [fotoEmPreview, setFotoEmPreview] = useState<FotoAnexada | null>(null);
 
@@ -69,8 +63,9 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [statusType, setStatusType] = useState<StatusType>("info");
 
-  const [showConfirmSave, setShowConfirmSave] = useState(false);
   const [showConfirmClear, setShowConfirmClear] = useState(false);
+  const [showMissingFieldsModal, setShowMissingFieldsModal] = useState(false);
+  const [camposAusentes, setCamposAusentes] = useState<string[]>([]);
 
   // Modal de resultado (sucesso/erro ao salvar)
   const [showResultModal, setShowResultModal] = useState(false);
@@ -109,49 +104,6 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
         break;
     }
 
-    // se digitou algo, desmarca "não declarado"
-    setNaoDeclarado((prev) => ({
-      ...prev,
-      [campo]: false,
-    }));
-  }
-
-  function toggleNaoDeclarado(campo: CampoForm) {
-    setNaoDeclarado((prev) => {
-      const novoValor = !prev[campo];
-
-      if (novoValor) {
-        // se marcou "não declarado", limpa o campo
-        switch (campo) {
-          case "protocolo":
-            setProtocolo("");
-            break;
-          case "ordemServico":
-            setOrdemServico("");
-            break;
-          case "bairro":
-            setBairro("");
-            break;
-          case "rua":
-            setRua("");
-            break;
-          case "numero":
-            setNumero("");
-            break;
-          case "referencia":
-            setReferencia("");
-            break;
-          case "observacoes":
-            setObservacoes("");
-            break;
-        }
-      }
-
-      return {
-        ...prev,
-        [campo]: novoValor,
-      };
-    });
   }
 
   function handleFotosChange(e: ChangeEvent<HTMLInputElement>) {
@@ -224,26 +176,12 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
     setObservacoes("");
     setFotos([]);
     setFotoEmPreview(null);
-    setNaoDeclarado({
-      protocolo: false,
-      ordemServico: false,
-      bairro: false,
-      rua: false,
-      numero: false,
-      referencia: false,
-      observacoes: false,
-    });
-
     if (showInfo) {
       setStatus("Formulário limpo.", "info");
     }
   }
 
-  async function handleSave() {
-    setStatusMessage(null);
-
-    const erros: string[] = [];
-
+  function obterCamposAusentes(): string[] {
     const valores: Record<CampoForm, string> = {
       protocolo,
       ordemServico,
@@ -254,37 +192,89 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
       observacoes,
     };
 
-    // 1) Ordem de Serviço OBRIGATÓRIA (sem "não declarado")
-    if (!ordemServico.trim()) {
-      erros.push("Preencha o campo Ordem de Serviço (obrigatório).");
-    }
+    return (Object.keys(valores) as CampoForm[])
+      .filter((campo) => !valores[campo].trim())
+      .map((campo) => LABELS_CAMPOS[campo]);
+  }
 
-    // 2) Demais campos seguem regra: valor OU "não declarado"
-    (Object.keys(valores) as CampoForm[]).forEach((campo) => {
-      if (campo === "ordemServico") return; // já validado acima
+  async function verificarDuplicidade(
+    protocoloInformado: string,
+    ordemServicoInformada: string
+  ): Promise<string[]> {
+    const duplicidades: string[] = [];
+    const ordensRef = collection(db, "ordensServico");
 
-      const valor = valores[campo].trim();
-      const marcado = naoDeclarado[campo];
+    if (protocoloInformado) {
+      const protocoloSnapshot = await getDocs(
+        query(
+          ordensRef,
+          where("protocolo", "==", protocoloInformado),
+          limit(1)
+        )
+      );
 
-      if (!valor && !marcado) {
-        erros.push(
-          `Preencha o campo ${LABELS_CAMPOS[campo]} ou marque "NÃO DECLARADO PELO CADASTRANTE".`
-        );
+      if (!protocoloSnapshot.empty) {
+        duplicidades.push(`Protocolo ${protocoloInformado}`);
       }
-    });
-
-    if (erros.length > 0) {
-      setStatus(erros.join(" "), "error");
-      return;
     }
+
+    if (ordemServicoInformada) {
+      const ordemSnapshot = await getDocs(
+        query(
+          ordensRef,
+          where("ordemServico", "==", ordemServicoInformada),
+          limit(1)
+        )
+      );
+
+      if (!ordemSnapshot.empty) {
+        duplicidades.push(`Ordem de Serviço ${ordemServicoInformada}`);
+      }
+    }
+
+    return duplicidades;
+  }
+
+  async function handleSave(continuarComCamposVazios = false) {
+    setStatusMessage(null);
+
+    if (!continuarComCamposVazios) {
+      const ausentes = obterCamposAusentes();
+
+      if (ausentes.length > 0) {
+        setCamposAusentes(ausentes);
+        setShowMissingFieldsModal(true);
+        return;
+      }
+    }
+
+    const protocoloNormalizado = protocolo.trim().toLocaleUpperCase("pt-BR");
+    const ordemServicoNormalizada = ordemServico
+      .trim()
+      .toLocaleUpperCase("pt-BR");
 
     try {
       setSaving(true);
 
+      const duplicidades = await verificarDuplicidade(
+        protocoloNormalizado,
+        ordemServicoNormalizada
+      );
+
+      if (duplicidades.length > 0) {
+        setResultType("error");
+        setResultMessage(
+          `Cadastro não realizado. Já existe uma ordem cadastrada com ${duplicidades.join(
+            " e "
+          )}.`
+        );
+        setShowResultModal(true);
+        return;
+      }
+
       const ordensRef = collection(db, "ordensServico");
       const ordemRef = doc(ordensRef);
 
-      // 1) Upload fotos Supabase (opcional)
       const fotosData: {
         id: string;
         nomeArquivo: string;
@@ -318,11 +308,10 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
         });
       }
 
-      // 2) Salvar Firestore (sem mais campos de PDF)
       await setDoc(ordemRef, {
         tipo: "ASFALTO",
-        protocolo: protocolo.trim() || null,
-        ordemServico: ordemServico.trim() || null,
+        protocolo: protocoloNormalizado || null,
+        ordemServico: ordemServicoNormalizada || null,
         bairro: bairro.trim() || null,
         rua: rua.trim() || null,
         numero: numero.trim() || null,
@@ -333,23 +322,25 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
         slaPausas: [],
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
+        createdByEmail: auth.currentUser?.email?.toLowerCase() ?? null,
+        createdByUid: auth.currentUser?.uid ?? null,
         fotos: fotosData,
       });
 
-      // Sucesso: limpa formulário sem mostrar "Formulário limpo."
       handleClear(false);
-
-      // limpa banner e abre modal de sucesso
+      setCamposAusentes([]);
+      setShowMissingFieldsModal(false);
       setStatusMessage(null);
       setResultType("success");
       setResultMessage("Ordem de serviço de Asfalto cadastrada com sucesso.");
       setShowResultModal(true);
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error(error);
 
       const msg =
-        error?.message ??
-        "Não foi possível salvar a OS de Asfalto. Verifique a conexão e tente novamente.";
+        error instanceof Error
+          ? error.message
+          : "Não foi possível salvar a OS de Asfalto. Verifique a conexão e tente novamente.";
 
       setStatusMessage(null);
       setResultType("error");
@@ -400,32 +391,19 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
                 value={protocolo}
                 onChange={(e) => handleInputChange("protocolo", e.target.value)}
                 placeholder="NÚMERO DO PROTOCOLO"
-                disabled={naoDeclarado.protocolo}
               />
-              <label className="field-hint">
-                <input
-                  type="checkbox"
-                  checked={naoDeclarado.protocolo}
-                  onChange={() => toggleNaoDeclarado("protocolo")}
-                />{" "}
-                NÃO DECLARADO PELO CADASTRANTE
-              </label>
             </div>
 
             <div className="page-field">
-              <label>
-                Ordem de Serviço{" "}
-                <span style={{ color: "var(--danger, #b91c1c)" }}>*</span>
-              </label>
+              <label>Ordem de Serviço</label>
               <input
                 type="text"
                 value={ordemServico}
                 onChange={(e) =>
                   handleInputChange("ordemServico", e.target.value)
                 }
-                placeholder="NÚMERO DA OS (OBRIGATÓRIO)"
+                placeholder="NÚMERO DA OS"
               />
-              <p className="field-hint">Campo obrigatório.</p>
             </div>
           </div>
         </div>
@@ -445,16 +423,7 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
                 value={bairro}
                 onChange={(e) => handleInputChange("bairro", e.target.value)}
                 placeholder="BAIRRO"
-                disabled={naoDeclarado.bairro}
               />
-              <label className="field-hint">
-                <input
-                  type="checkbox"
-                  checked={naoDeclarado.bairro}
-                  onChange={() => toggleNaoDeclarado("bairro")}
-                />{" "}
-                NÃO DECLARADO PELO CADASTRANTE
-              </label>
             </div>
 
             <div className="page-field">
@@ -464,16 +433,7 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
                 value={rua}
                 onChange={(e) => handleInputChange("rua", e.target.value)}
                 placeholder="NOME DA RUA OU AVENIDA"
-                disabled={naoDeclarado.rua}
               />
-              <label className="field-hint">
-                <input
-                  type="checkbox"
-                  checked={naoDeclarado.rua}
-                  onChange={() => toggleNaoDeclarado("rua")}
-                />{" "}
-                NÃO DECLARADO PELO CADASTRANTE
-              </label>
             </div>
 
             <div className="page-field">
@@ -483,16 +443,7 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
                 value={numero}
                 onChange={(e) => handleInputChange("numero", e.target.value)}
                 placeholder="Nº"
-                disabled={naoDeclarado.numero}
               />
-              <label className="field-hint">
-                <input
-                  type="checkbox"
-                  checked={naoDeclarado.numero}
-                  onChange={() => toggleNaoDeclarado("numero")}
-                />{" "}
-                NÃO DECLARADO PELO CADASTRANTE
-              </label>
             </div>
 
             <div className="page-field">
@@ -504,16 +455,7 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
                   handleInputChange("referencia", e.target.value)
                 }
                 placeholder="PRÓXIMO A..., EM FRENTE A..."
-                disabled={naoDeclarado.referencia}
               />
-              <label className="field-hint">
-                <input
-                  type="checkbox"
-                  checked={naoDeclarado.referencia}
-                  onChange={() => toggleNaoDeclarado("referencia")}
-                />{" "}
-                NÃO DECLARADO PELO CADASTRANTE
-              </label>
             </div>
           </div>
         </div>
@@ -530,20 +472,9 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
             <label>Observações</label>
             <textarea
               value={observacoes}
-              onChange={(e) =>
-                handleInputChange("observacoes", e.target.value)
-              }
+              onChange={(e) => handleInputChange("observacoes", e.target.value)}
               placeholder="EX.: TRECHO COM GRANDE FLUXO, NECESSÁRIO APOIO DA GUARDA, BURACO PROFUNDO, RISCO PARA PEDESTRES..."
-              disabled={naoDeclarado.observacoes}
             />
-            <label className="field-hint">
-              <input
-                type="checkbox"
-                checked={naoDeclarado.observacoes}
-                onChange={() => toggleNaoDeclarado("observacoes")}
-              />{" "}
-              NÃO DECLARADO PELO CADASTRANTE
-            </label>
           </div>
         </div>
 
@@ -584,9 +515,7 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
                       onClick={() => handleOpenPreview(foto)}
                     >
                       <img src={foto.url} alt="Foto anexada" />
-                      <span className="photo-timestamp">
-                        {foto.timestamp}
-                      </span>
+                      <span className="photo-timestamp">{foto.timestamp}</span>
                     </div>
                   ))}
                 </div>
@@ -601,7 +530,7 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
             type="button"
             className="btn-primary btn-save"
             disabled={saving}
-            onClick={() => setShowConfirmSave(true)}
+            onClick={() => void handleSave()}
           >
             {saving ? "Salvando..." : "Salvar OS"}
           </button>
@@ -619,17 +548,10 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
       {/* MODAL DE PRÉ-VISUALIZAÇÃO DA FOTO */}
       {fotoEmPreview && (
         <div className="modal-backdrop" onClick={handleClosePreview}>
-          <div
-            className="modal modal-photo"
-            onClick={(e) => e.stopPropagation()}
-          >
+          <div className="modal modal-photo" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <h3 className="modal-title">Pré-visualização da foto</h3>
-              <button
-                type="button"
-                className="modal-close"
-                onClick={handleClosePreview}
-              >
+              <button type="button" className="modal-close" onClick={handleClosePreview}>
                 ×
               </button>
             </div>
@@ -645,17 +567,11 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
                   borderRadius: "0.75rem",
                 }}
               />
-              <p className="field-hint">
-                Anexada em {fotoEmPreview.timestamp}
-              </p>
+              <p className="field-hint">Anexada em {fotoEmPreview.timestamp}</p>
             </div>
 
             <div className="modal-footer">
-              <button
-                type="button"
-                className="btn-secondary"
-                onClick={handleClosePreview}
-              >
+              <button type="button" className="btn-secondary" onClick={handleClosePreview}>
                 Fechar
               </button>
               <button
@@ -670,48 +586,51 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
         </div>
       )}
 
-      {/* MODAL CONFIRMAR SALVAR */}
-      {showConfirmSave && (
+      {/* MODAL PARA CAMPOS NÃO PREENCHIDOS */}
+      {showMissingFieldsModal && (
         <div
           className="modal-backdrop"
-          onClick={() => !saving && setShowConfirmSave(false)}
+          onClick={() => !saving && setShowMissingFieldsModal(false)}
         >
-          <div
-            className="modal"
-            onClick={(e) => e.stopPropagation()}
-          >
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
-              <h3 className="modal-title">Confirmar salvamento</h3>
+              <h3 className="modal-title">Campos não preenchidos</h3>
               <button
                 type="button"
                 className="modal-close"
-                onClick={() => !saving && setShowConfirmSave(false)}
+                onClick={() => !saving && setShowMissingFieldsModal(false)}
               >
                 ×
               </button>
             </div>
             <div className="modal-body">
-              <p>Tem certeza que deseja salvar esta ordem de serviço?</p>
+              <p>Os seguintes campos não foram preenchidos:</p>
+              <ul>
+                {camposAusentes.map((campo) => (
+                  <li key={campo}>{campo}</li>
+                ))}
+              </ul>
+              <p>Deseja continuar mesmo assim ou voltar para editar?</p>
             </div>
             <div className="modal-footer">
               <button
                 type="button"
                 className="btn-secondary"
-                onClick={() => setShowConfirmSave(false)}
+                onClick={() => setShowMissingFieldsModal(false)}
                 disabled={saving}
               >
-                Cancelar
+                Voltar para editar
               </button>
               <button
                 type="button"
                 className="btn-primary btn-save"
                 onClick={async () => {
-                  setShowConfirmSave(false);
-                  await handleSave();
+                  setShowMissingFieldsModal(false);
+                  await handleSave(true);
                 }}
                 disabled={saving}
               >
-                Confirmar
+                {saving ? "Salvando..." : "Continuar mesmo assim"}
               </button>
             </div>
           </div>
@@ -720,21 +639,11 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
 
       {/* MODAL CONFIRMAR LIMPAR */}
       {showConfirmClear && (
-        <div
-          className="modal-backdrop"
-          onClick={() => setShowConfirmClear(false)}
-        >
-          <div
-            className="modal"
-            onClick={(e) => e.stopPropagation()}
-          >
+        <div className="modal-backdrop" onClick={() => setShowConfirmClear(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <h3 className="modal-title">Confirmar limpeza</h3>
-              <button
-                type="button"
-                className="modal-close"
-                onClick={() => setShowConfirmClear(false)}
-              >
+              <button type="button" className="modal-close" onClick={() => setShowConfirmClear(false)}>
                 ×
               </button>
             </div>
@@ -768,25 +677,13 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
 
       {/* MODAL RESULTADO (SUCESSO / ERRO AO SALVAR) */}
       {showResultModal && (
-        <div
-          className="modal-backdrop"
-          onClick={() => setShowResultModal(false)}
-        >
-          <div
-            className="modal"
-            onClick={(e) => e.stopPropagation()}
-          >
+        <div className="modal-backdrop" onClick={() => setShowResultModal(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <h3 className="modal-title">
-                {resultType === "success"
-                  ? "Cadastro salvo com sucesso"
-                  : "Erro ao salvar OS"}
+                {resultType === "success" ? "Cadastro salvo com sucesso" : "Erro ao salvar OS"}
               </h3>
-              <button
-                type="button"
-                className="modal-close"
-                onClick={() => setShowResultModal(false)}
-              >
+              <button type="button" className="modal-close" onClick={() => setShowResultModal(false)}>
                 ×
               </button>
             </div>
@@ -794,11 +691,7 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
               <p>{resultMessage}</p>
             </div>
             <div className="modal-footer">
-              <button
-                type="button"
-                className="btn-primary"
-                onClick={() => setShowResultModal(false)}
-              >
+              <button type="button" className="btn-primary" onClick={() => setShowResultModal(false)}>
                 OK
               </button>
             </div>
