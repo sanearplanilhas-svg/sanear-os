@@ -24,6 +24,7 @@ import "./TerceirizadaVisao.css";
 
 // bucket do Supabase onde as OS estão sendo gravadas
 const STORAGE_BUCKET = "os-arquivos";
+const MAX_FOTOS_EXECUCAO = 2;
 
 // pdf-lib para gerar o PDF com dados da OS
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
@@ -239,6 +240,15 @@ function dataUrlToBlob(dataUrl: string): Blob {
   }
 
   return new Blob([bytes], { type: mime });
+}
+
+function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(reader.error ?? new Error("Falha ao ler a imagem."));
+    reader.readAsDataURL(file);
+  });
 }
 
 // quebra texto dentro da largura no PDF
@@ -760,6 +770,17 @@ const TerceirizadaVisao: React.FC = () => {
     return photosByOsId[modalOs.id] || [];
   }, [modalOs, photosByOsId]);
 
+  const fotosExecucaoJaSalvas = useMemo(() => {
+    if (!modalOs || !Array.isArray(modalOs.fotosExecucao)) return 0;
+    return modalOs.fotosExecucao.length;
+  }, [modalOs]);
+
+  const totalFotosExecucao = fotosExecucaoJaSalvas + currentPhotos.length;
+  const vagasFotosExecucao = Math.max(
+    0,
+    MAX_FOTOS_EXECUCAO - totalFotosExecucao
+  );
+
   const totalAbertas = ordens.filter((os) => isOpenStatus(os.status)).length;
   const totalConcluidas = ordens.filter((os) =>
     isDoneStatus(os.status)
@@ -805,53 +826,112 @@ const TerceirizadaVisao: React.FC = () => {
     }
   }
 
-  function handleModalFilesChange(e: ChangeEvent<HTMLInputElement>) {
+  async function handleModalFilesChange(
+    e: ChangeEvent<HTMLInputElement>
+  ) {
     if (!modalOs) return;
 
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
+    const input = e.currentTarget;
+    const files = Array.from(input.files ?? []);
+    input.value = "";
+
+    if (files.length === 0) return;
+
+    const fotosAtuais = photosByOsId[modalOs.id] || [];
+    const salvas = Array.isArray(modalOs.fotosExecucao)
+      ? modalOs.fotosExecucao.length
+      : 0;
+    const vagas = Math.max(
+      0,
+      MAX_FOTOS_EXECUCAO - salvas - fotosAtuais.length
+    );
+
+    if (vagas === 0) {
+      setInfoModal({
+        title: "Limite de fotos atingido",
+        message: `Cada OS pode ter no máximo ${MAX_FOTOS_EXECUCAO} fotos do serviço executado. Exclua uma foto antes de adicionar outra.`,
+      });
+      return;
+    }
 
     const allowed = ["image/jpeg", "image/jpg", "image/png", "image/webp"];
+    const validFiles = files.filter((file) => allowed.includes(file.type));
+    const invalidFiles = files.filter((file) => !allowed.includes(file.type));
+    const acceptedFiles = validFiles.slice(0, vagas);
+    const ignoredByLimit = Math.max(0, validFiles.length - acceptedFiles.length);
 
-    Array.from(files).forEach((file) => {
-      if (!allowed.includes(file.type)) {
-        setInfoModal({
-          title: "Arquivo não suportado",
-          message: `O arquivo "${file.name}" não é uma imagem válida. Use formatos JPG, PNG ou WEBP.`,
-        });
-        return;
-      }
+    if (acceptedFiles.length === 0) {
+      setInfoModal({
+        title: "Nenhuma foto adicionada",
+        message:
+          invalidFiles.length > 0
+            ? "Use somente imagens nos formatos JPG, PNG ou WEBP."
+            : `O limite é de ${MAX_FOTOS_EXECUCAO} fotos por OS.`,
+      });
+      return;
+    }
 
-      const reader = new FileReader();
-      reader.onload = () => {
-        const dataUrl = reader.result as string;
-        const nowText = new Date().toLocaleString("pt-BR", {
-          day: "2-digit",
-          month: "2-digit",
-          year: "numeric",
-          hour: "2-digit",
-          minute: "2-digit",
-        });
+    try {
+      const nowText = new Date().toLocaleString("pt-BR", {
+        day: "2-digit",
+        month: "2-digit",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
 
-        const photo: LocalPhoto = {
+      const newPhotos: LocalPhoto[] = await Promise.all(
+        acceptedFiles.map(async (file) => ({
           id: generateLocalId(),
           name: file.name,
-          dataUrl,
+          dataUrl: await fileToDataUrl(file),
           createdAt: nowText,
+        }))
+      );
+
+      setPhotosByOsId((prev) => {
+        const prevForOs = prev[modalOs.id] || [];
+        const limiteDisponivel = Math.max(
+          0,
+          MAX_FOTOS_EXECUCAO - salvas - prevForOs.length
+        );
+
+        return {
+          ...prev,
+          [modalOs.id]: [
+            ...prevForOs,
+            ...newPhotos.slice(0, limiteDisponivel),
+          ],
         };
+      });
 
-        setPhotosByOsId((prev) => {
-          const prevForOs = prev[modalOs.id] || [];
-          return {
-            ...prev,
-            [modalOs.id]: [...prevForOs, photo],
-          };
+      if (ignoredByLimit > 0 || invalidFiles.length > 0) {
+        const mensagens: string[] = [];
+
+        if (ignoredByLimit > 0) {
+          mensagens.push(
+            `${ignoredByLimit} foto(s) não foram adicionadas porque o limite é de ${MAX_FOTOS_EXECUCAO} por OS.`
+          );
+        }
+
+        if (invalidFiles.length > 0) {
+          mensagens.push(
+            `${invalidFiles.length} arquivo(s) foram ignorados por não serem JPG, PNG ou WEBP.`
+          );
+        }
+
+        setInfoModal({
+          title: "Fotos adicionadas com restrições",
+          message: mensagens.join(" "),
         });
-      };
-      reader.readAsDataURL(file);
-    });
-
-    e.target.value = "";
+      }
+    } catch (error) {
+      console.error(error);
+      setInfoModal({
+        title: "Erro ao ler as fotos",
+        message: "Não foi possível carregar uma das imagens selecionadas.",
+      });
+    }
   }
 
   function handleRemoveModalPhoto(id: string) {
@@ -983,13 +1063,21 @@ async function handleServicoExecutado() {
       return;
     }
 
-    // exige pelo menos uma foto
-    if (currentPhotos.length === 0) {
+    if (totalFotosExecucao === 0) {
       setShowPhotoUploader(true);
       setInfoModal({
         title: "Foto obrigatória",
         message:
-          "Para marcar esta OS como concluída, anexe pelo menos uma foto do serviço executado.",
+          "Para marcar esta OS como concluída, anexe uma ou duas fotos do serviço executado.",
+      });
+      return;
+    }
+
+    if (totalFotosExecucao > MAX_FOTOS_EXECUCAO) {
+      setShowPhotoUploader(true);
+      setInfoModal({
+        title: "Limite de fotos excedido",
+        message: `A OS pode ter no máximo ${MAX_FOTOS_EXECUCAO} fotos do serviço executado. Exclua as fotos excedentes antes de concluir.`,
       });
       return;
     }
@@ -1846,9 +1934,16 @@ async function handleServicoExecutado() {
               <div className="page-section">
                 <h3>Fotos do serviço executado</h3>
                 <p className="page-section-description">
-                  Ao marcar como concluída, será solicitado anexar pelo menos
-                  uma foto. As imagens abaixo ficam apenas nesta sessão.
+                  Para concluir a OS, anexe uma ou duas fotos do serviço
+                  executado. Não é permitido anexar mais de duas imagens.
                 </p>
+
+                <div className="execution-photo-limit">
+                  <span>Fotos anexadas</span>
+                  <strong>
+                    {totalFotosExecucao}/{MAX_FOTOS_EXECUCAO}
+                  </strong>
+                </div>
 
                 {currentPhotos.length > 0 ? (
                   <div className="page-photos-block">
@@ -1890,27 +1985,38 @@ async function handleServicoExecutado() {
                   <div className="photo-upload">
                     <label
                       htmlFor="upload-fotos-modal"
-                      className="btn-secondary"
+                      className={`btn-secondary ${
+                        vagasFotosExecucao === 0 ? "is-disabled" : ""
+                      }`}
                       style={{
                         display: "inline-flex",
                         alignItems: "center",
                         gap: "0.4rem",
-                        cursor: "pointer",
+                        cursor:
+                          vagasFotosExecucao === 0 ? "not-allowed" : "pointer",
                       }}
+                      aria-disabled={vagasFotosExecucao === 0}
                     >
-                      📷 Adicionar fotos do serviço
+                      {vagasFotosExecucao === 0
+                        ? "✓ Limite de 2 fotos atingido"
+                        : `📷 Adicionar foto${
+                            vagasFotosExecucao > 1 ? "s" : ""
+                          } (${vagasFotosExecucao} restante${
+                            vagasFotosExecucao > 1 ? "s" : ""
+                          })`}
                     </label>
                     <input
                       id="upload-fotos-modal"
                       type="file"
                       accept="image/jpeg,image/png,image/webp,image/jpg"
                       multiple
+                      disabled={vagasFotosExecucao === 0}
                       onChange={handleModalFilesChange}
                       style={{ display: "none" }}
                     />
-                    {showPhotoUploader && (
+                    {showPhotoUploader && totalFotosExecucao === 0 && (
                       <p className="photo-hint">
-                        Anexe pelo menos uma foto do serviço executado para
+                        Anexe uma ou duas fotos do serviço executado para
                         concluir esta OS.
                       </p>
                     )}
