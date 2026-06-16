@@ -28,6 +28,16 @@ type StatusType = "success" | "error" | "info";
 
 const STORAGE_BUCKET = "os-arquivos";
 
+const FORM_STEPS = [
+  { id: "identificacao", label: "Identificação", short: "ID" },
+  { id: "local", label: "Local", short: "Local" },
+  { id: "detalhes", label: "Detalhes", short: "Obs." },
+  { id: "anexos", label: "Fotos", short: "Fotos" },
+  { id: "confirmacao", label: "Confirmar", short: "OK" },
+] as const;
+
+type FormStep = (typeof FORM_STEPS)[number]["id"];
+
 type CampoForm =
   | "protocolo"
   | "ordemServico"
@@ -71,6 +81,29 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
   const [showResultModal, setShowResultModal] = useState(false);
   const [resultType, setResultType] = useState<"success" | "error">("success");
   const [resultMessage, setResultMessage] = useState("");
+
+  const [mobileStep, setMobileStep] = useState<FormStep>("identificacao");
+  const currentStepIndex = Math.max(
+    0,
+    FORM_STEPS.findIndex((step) => step.id === mobileStep)
+  );
+  const isLastMobileStep = currentStepIndex === FORM_STEPS.length - 1;
+
+  function goToMobileStep(step: FormStep) {
+    setMobileStep(step);
+    setStatusMessage(null);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function goToPreviousMobileStep() {
+    const previous = FORM_STEPS[Math.max(0, currentStepIndex - 1)];
+    goToMobileStep(previous.id);
+  }
+
+  function goToNextMobileStep() {
+    const next = FORM_STEPS[Math.min(FORM_STEPS.length - 1, currentStepIndex + 1)];
+    goToMobileStep(next.id);
+  }
 
   function setStatus(msg: string, type: StatusType = "info") {
     setStatusMessage(msg);
@@ -176,6 +209,7 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
     setObservacoes("");
     setFotos([]);
     setFotoEmPreview(null);
+    setMobileStep("identificacao");
     if (showInfo) {
       setStatus("Formulário limpo.", "info");
     }
@@ -373,11 +407,27 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
       )}
 
       <form
-        className="page-form"
+        className="page-form page-form-mobile-wizard"
         onSubmit={(e: FormEvent<HTMLFormElement>) => e.preventDefault()}
       >
+        <div className="mobile-form-progress" aria-label="Etapas do cadastro">
+          {FORM_STEPS.map((step, index) => (
+            <button
+              key={step.id}
+              type="button"
+              className={`mobile-form-step ${
+                step.id === mobileStep ? "is-active" : ""
+              } ${index < currentStepIndex ? "is-done" : ""}`}
+              onClick={() => goToMobileStep(step.id)}
+            >
+              <span>{index + 1}</span>
+              <strong>{step.short}</strong>
+            </button>
+          ))}
+        </div>
+
         {/* Identificação */}
-        <div className="page-section">
+        <div className={`page-section mobile-form-panel ${mobileStep === "identificacao" ? "is-active" : ""}`}>
           <h3>Identificação da OS</h3>
           <p className="page-section-description">
             Dados principais da ordem de serviço de Asfalto.
@@ -409,7 +459,7 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
         </div>
 
         {/* Local */}
-        <div className="page-section">
+        <div className={`page-section mobile-form-panel ${mobileStep === "local" ? "is-active" : ""}`}>
           <h3>Local do serviço</h3>
           <p className="page-section-description">
             Informe onde o serviço de asfalto precisa ser executado.
@@ -461,7 +511,7 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
         </div>
 
         {/* Observações */}
-        <div className="page-section">
+        <div className={`page-section mobile-form-panel ${mobileStep === "detalhes" ? "is-active" : ""}`}>
           <h3>Observações importantes</h3>
           <p className="page-section-description">
             Detalhes que ajudem a equipe a entender melhor a condição do asfalto,
@@ -479,7 +529,7 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
         </div>
 
         {/* Fotos */}
-        <div className="page-section">
+        <div className={`page-section mobile-form-panel ${mobileStep === "anexos" ? "is-active" : ""}`}>
           <h3>Fotos do local</h3>
           <p className="page-section-description">
             Anexe fotos da situação atual do asfalto (opcional). Clique em uma
@@ -524,8 +574,50 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
           </div>
         </div>
 
-        {/* Botões */}
-        <div className="page-actions">
+        <div
+          className={`page-section mobile-form-panel mobile-confirmation-panel ${
+            mobileStep === "confirmacao" ? "is-active" : ""
+          }`}
+        >
+          <h3>Conferência final</h3>
+          <p className="page-section-description">
+            Confira os principais dados antes de salvar a ordem de serviço de Asfalto.
+          </p>
+
+          <div className="mobile-review-card">
+            <div>
+              <span>Protocolo</span>
+              <strong>{protocolo || "Não informado"}</strong>
+            </div>
+            <div>
+              <span>Ordem de Serviço</span>
+              <strong>{ordemServico || "Não informada"}</strong>
+            </div>
+            <div>
+              <span>Bairro</span>
+              <strong>{bairro || "Não informado"}</strong>
+            </div>
+            <div>
+              <span>Rua / Número</span>
+              <strong>{rua || "Rua não informada"}{numero ? `, nº ${numero}` : ""}</strong>
+            </div>
+            <div>
+              <span>Ponto de referência</span>
+              <strong>{referencia || "Não informado"}</strong>
+            </div>
+            <div>
+              <span>Observações</span>
+              <strong>{observacoes || "Sem observações"}</strong>
+            </div>
+            <div>
+              <span>Fotos anexadas</span>
+              <strong>{fotos.length} foto{fotos.length === 1 ? "" : "s"}</strong>
+            </div>
+          </div>
+        </div>
+
+        {/* Botões desktop */}
+        <div className="page-actions desktop-form-actions">
           <button
             type="button"
             className="btn-primary btn-save"
@@ -542,6 +634,37 @@ const Asfalto: React.FC<AsfaltoProps> = ({ onBack }) => {
           >
             Limpar
           </button>
+        </div>
+
+        <div className="mobile-form-navigation">
+          <button
+            type="button"
+            className="btn-secondary"
+            disabled={saving || currentStepIndex === 0}
+            onClick={goToPreviousMobileStep}
+          >
+            Voltar
+          </button>
+
+          {isLastMobileStep ? (
+            <button
+              type="button"
+              className="btn-primary btn-save"
+              disabled={saving}
+              onClick={() => void handleSave()}
+            >
+              {saving ? "Salvando..." : "Salvar OS"}
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={saving}
+              onClick={goToNextMobileStep}
+            >
+              Próximo
+            </button>
+          )}
         </div>
       </form>
 

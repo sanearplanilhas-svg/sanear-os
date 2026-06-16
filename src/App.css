@@ -4610,3 +4610,267 @@ body {
     grid-template-columns: 1fr;
   }
 }
+
+/* =========================================================
+   PASSO 4 MOBILE — Formulários em etapas
+   Mantém formulário completo no desktop e cria experiência de app no celular.
+   ========================================================= */
+.mobile-form-progress,
+.mobile-form-navigation {
+  display: none;
+}
+
+.mobile-confirmation-panel {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  .page-form-mobile-wizard {
+    gap: 0.9rem;
+  }
+
+  .mobile-form-progress {
+    position: sticky;
+    top: 72px;
+    z-index: 70;
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 0.38rem;
+    margin: -0.1rem -0.08rem 0.25rem;
+    padding: 0.48rem;
+    border: 1px solid rgba(226, 232, 240, 0.96);
+    border-radius: 20px;
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.96));
+    box-shadow: 0 14px 30px rgba(15, 23, 42, 0.08);
+    backdrop-filter: blur(16px);
+  }
+
+  .mobile-form-step {
+    min-width: 0;
+    min-height: 54px;
+    padding: 0.36rem 0.24rem;
+    border: 1px solid transparent;
+    border-radius: 16px;
+    background: transparent;
+    color: #64748b;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.18rem;
+    font-weight: 900;
+    transition:
+      background 0.16s ease,
+      color 0.16s ease,
+      transform 0.16s ease,
+      border-color 0.16s ease;
+  }
+
+  .mobile-form-step span {
+    width: 24px;
+    height: 24px;
+    border-radius: 999px;
+    display: grid;
+    place-items: center;
+    background: #e2e8f0;
+    color: #475569;
+    font-size: 0.72rem;
+    line-height: 1;
+  }
+
+  .mobile-form-step strong {
+    max-width: 100%;
+    font-size: 0.66rem;
+    line-height: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .mobile-form-step.is-active {
+    background: #e0f2fe;
+    color: #0369a1;
+    border-color: rgba(14, 165, 233, 0.2);
+    transform: translateY(-1px);
+  }
+
+  .mobile-form-step.is-active span {
+    background: #0284c7;
+    color: #ffffff;
+    box-shadow: 0 10px 18px rgba(2, 132, 199, 0.24);
+  }
+
+  .mobile-form-step.is-done {
+    color: #166534;
+  }
+
+  .mobile-form-step.is-done span {
+    background: #dcfce7;
+    color: #166534;
+  }
+
+  .page-form-mobile-wizard .mobile-form-panel {
+    display: none;
+  }
+
+  .page-form-mobile-wizard .mobile-form-panel.is-active {
+    display: block;
+    margin-top: 0;
+    padding: 1rem;
+    border: 1px solid rgba(226, 232, 240, 0.95);
+    border-radius: 22px;
+    background:
+      radial-gradient(circle at 16% 0%, rgba(14, 165, 233, 0.08), transparent 34%),
+      #ffffff;
+    box-shadow: 0 16px 34px rgba(15, 23, 42, 0.07);
+    animation: mobile-form-panel-in 0.18s ease-out both;
+  }
+
+  .page-form-mobile-wizard .mobile-form-panel.is-active h3 {
+    margin-top: 0;
+    margin-bottom: 0.22rem;
+    color: #0f172a;
+    font-size: 1.04rem;
+    line-height: 1.16;
+    letter-spacing: -0.015em;
+  }
+
+  .page-form-mobile-wizard .mobile-form-panel.is-active .page-section-description {
+    margin-bottom: 0.88rem;
+    line-height: 1.38;
+  }
+
+  .page-form-mobile-wizard .page-field input,
+  .page-form-mobile-wizard .page-field textarea,
+  .page-form-mobile-wizard .page-field select {
+    min-height: 48px;
+    border-radius: 16px;
+    background: #f8fafc;
+    font-size: 16px;
+  }
+
+  .page-form-mobile-wizard .page-field textarea {
+    min-height: 140px;
+  }
+
+  .page-form-mobile-wizard .photo-upload input[type="file"] {
+    width: 100%;
+    min-height: 48px;
+    padding: 0.72rem;
+    border: 1px dashed rgba(14, 165, 233, 0.42);
+    border-radius: 16px;
+    background: #f0f9ff;
+  }
+
+  .desktop-form-actions {
+    display: none !important;
+  }
+
+  .mobile-form-navigation {
+    position: sticky;
+    bottom: calc(5.6rem + env(safe-area-inset-bottom));
+    z-index: 75;
+    display: grid;
+    grid-template-columns: 0.88fr 1.12fr;
+    gap: 0.65rem;
+    margin-top: 0.85rem;
+    padding: 0.72rem;
+    border: 1px solid rgba(226, 232, 240, 0.95);
+    border-radius: 22px;
+    background: rgba(255, 255, 255, 0.96);
+    box-shadow: 0 18px 40px rgba(15, 23, 42, 0.14);
+    backdrop-filter: blur(18px);
+  }
+
+  .mobile-form-navigation .btn-primary,
+  .mobile-form-navigation .btn-secondary {
+    width: 100%;
+    justify-content: center;
+    min-height: 48px;
+    border-radius: 16px;
+    font-weight: 950;
+  }
+
+  .mobile-form-navigation .btn-secondary:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .mobile-review-card {
+    display: grid;
+    gap: 0.62rem;
+  }
+
+  .mobile-review-card > div {
+    min-width: 0;
+    padding: 0.74rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 16px;
+    background: #f8fafc;
+  }
+
+  .mobile-review-card span {
+    display: block;
+    margin-bottom: 0.24rem;
+    color: #64748b;
+    font-size: 0.7rem;
+    font-weight: 950;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .mobile-review-card strong {
+    display: block;
+    color: #0f172a;
+    font-size: 0.9rem;
+    line-height: 1.3;
+    overflow-wrap: anywhere;
+  }
+
+  .page-form-mobile-wizard .status-banner {
+    border-radius: 16px;
+  }
+
+  .page-form-mobile-wizard .photo-preview-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .page-form-mobile-wizard .photo-preview-item img {
+    height: 118px;
+  }
+}
+
+@media (max-width: 390px) {
+  .mobile-form-progress {
+    gap: 0.25rem;
+    padding: 0.4rem;
+    border-radius: 18px;
+  }
+
+  .mobile-form-step {
+    min-height: 50px;
+    border-radius: 14px;
+  }
+
+  .mobile-form-step strong {
+    font-size: 0.6rem;
+  }
+
+  .mobile-form-navigation {
+    grid-template-columns: 1fr;
+    bottom: calc(5.45rem + env(safe-area-inset-bottom));
+  }
+}
+
+@keyframes mobile-form-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.995);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}

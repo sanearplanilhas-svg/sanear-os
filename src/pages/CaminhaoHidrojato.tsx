@@ -29,6 +29,16 @@ const STORAGE_BUCKET = "os-arquivos";
 const COLLECTION_NAME = "ordensHidrojato";
 const STORAGE_BASE_PATH = "hidrojato";
 
+const FORM_STEPS = [
+  { id: "identificacao", label: "Identificação", short: "ID" },
+  { id: "local", label: "Local", short: "Local" },
+  { id: "detalhes", label: "Detalhes", short: "Obs." },
+  { id: "anexos", label: "PDF", short: "PDF" },
+  { id: "confirmacao", label: "Confirmar", short: "OK" },
+] as const;
+
+type FormStep = (typeof FORM_STEPS)[number]["id"];
+
 type CampoForm =
   | "protocolo"
   | "ordemServico"
@@ -78,6 +88,29 @@ const CaminhaoHidrojato: React.FC<CaminhaoHidrojatoProps> = ({ onBack }) => {
   const [showResultModal, setShowResultModal] = useState(false);
   const [resultType, setResultType] = useState<"success" | "error">("success");
   const [resultMessage, setResultMessage] = useState("");
+
+  const [mobileStep, setMobileStep] = useState<FormStep>("identificacao");
+  const currentStepIndex = Math.max(
+    0,
+    FORM_STEPS.findIndex((step) => step.id === mobileStep)
+  );
+  const isLastMobileStep = currentStepIndex === FORM_STEPS.length - 1;
+
+  function goToMobileStep(step: FormStep) {
+    setMobileStep(step);
+    setStatusMessage(null);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function goToPreviousMobileStep() {
+    const previous = FORM_STEPS[Math.max(0, currentStepIndex - 1)];
+    goToMobileStep(previous.id);
+  }
+
+  function goToNextMobileStep() {
+    const next = FORM_STEPS[Math.min(FORM_STEPS.length - 1, currentStepIndex + 1)];
+    goToMobileStep(next.id);
+  }
 
   function setStatus(msg: string, type: StatusType = "info") {
     setStatusMessage(msg);
@@ -158,6 +191,7 @@ const CaminhaoHidrojato: React.FC<CaminhaoHidrojatoProps> = ({ onBack }) => {
     setReferencia("");
     setObservacoes("");
     setPdfOs(null);
+    setMobileStep("identificacao");
 
     if (showInfo) {
       setStatus("Formulário limpo.", "info");
@@ -376,10 +410,26 @@ const CaminhaoHidrojato: React.FC<CaminhaoHidrojatoProps> = ({ onBack }) => {
       )}
 
       <form
-        className="page-form"
+        className="page-form page-form-mobile-wizard"
         onSubmit={(e: FormEvent<HTMLFormElement>) => e.preventDefault()}
       >
-        <div className="page-section">
+        <div className="mobile-form-progress" aria-label="Etapas do cadastro">
+          {FORM_STEPS.map((step, index) => (
+            <button
+              key={step.id}
+              type="button"
+              className={`mobile-form-step ${
+                step.id === mobileStep ? "is-active" : ""
+              } ${index < currentStepIndex ? "is-done" : ""}`}
+              onClick={() => goToMobileStep(step.id)}
+            >
+              <span>{index + 1}</span>
+              <strong>{step.short}</strong>
+            </button>
+          ))}
+        </div>
+
+        <div className={`page-section mobile-form-panel ${mobileStep === "identificacao" ? "is-active" : ""}`}>
           <h3>Identificação da OS</h3>
           <p className="page-section-description">
             Dados principais da ordem de serviço do caminhão hidrojato.
@@ -408,7 +458,7 @@ const CaminhaoHidrojato: React.FC<CaminhaoHidrojatoProps> = ({ onBack }) => {
           </div>
         </div>
 
-        <div className="page-section">
+        <div className={`page-section mobile-form-panel ${mobileStep === "local" ? "is-active" : ""}`}>
           <h3>Local do serviço</h3>
           <p className="page-section-description">
             Informe onde o caminhão hidrojato precisa executar o atendimento.
@@ -457,7 +507,7 @@ const CaminhaoHidrojato: React.FC<CaminhaoHidrojatoProps> = ({ onBack }) => {
           </div>
         </div>
 
-        <div className="page-section">
+        <div className={`page-section mobile-form-panel ${mobileStep === "detalhes" ? "is-active" : ""}`}>
           <h3>Observações importantes</h3>
           <p className="page-section-description">
             Detalhes que ajudem a equipe a entender melhor o serviço, acesso do
@@ -474,7 +524,7 @@ const CaminhaoHidrojato: React.FC<CaminhaoHidrojatoProps> = ({ onBack }) => {
           </div>
         </div>
 
-        <div className="page-section">
+        <div className={`page-section mobile-form-panel ${mobileStep === "anexos" ? "is-active" : ""}`}>
           <h3>OS em PDF</h3>
           <p className="page-section-description">
             Anexe o PDF da ordem de serviço que deverá ficar vinculado ao atendimento do hidrojato.
@@ -502,7 +552,49 @@ const CaminhaoHidrojato: React.FC<CaminhaoHidrojatoProps> = ({ onBack }) => {
           </div>
         </div>
 
-        <div className="page-actions">
+        <div
+          className={`page-section mobile-form-panel mobile-confirmation-panel ${
+            mobileStep === "confirmacao" ? "is-active" : ""
+          }`}
+        >
+          <h3>Conferência final</h3>
+          <p className="page-section-description">
+            Confira os dados antes de salvar a ordem de serviço de Caminhão Hidrojato.
+          </p>
+
+          <div className="mobile-review-card">
+            <div>
+              <span>Protocolo</span>
+              <strong>{protocolo || "Não informado"}</strong>
+            </div>
+            <div>
+              <span>Ordem de Serviço</span>
+              <strong>{ordemServico || "Não informada"}</strong>
+            </div>
+            <div>
+              <span>Bairro</span>
+              <strong>{bairro || "Não informado"}</strong>
+            </div>
+            <div>
+              <span>Rua / Número</span>
+              <strong>{rua || "Rua não informada"}{numero ? `, nº ${numero}` : ""}</strong>
+            </div>
+            <div>
+              <span>Ponto de referência</span>
+              <strong>{referencia || "Não informado"}</strong>
+            </div>
+            <div>
+              <span>Observações</span>
+              <strong>{observacoes || "Sem observações"}</strong>
+            </div>
+            <div>
+              <span>PDF anexado</span>
+              <strong>{pdfOs ? pdfOs.nomeArquivo : "Nenhum PDF anexado"}</strong>
+            </div>
+          </div>
+        </div>
+
+        <div className="page-actions desktop-form-actions">
           <button
             type="button"
             className="btn-primary btn-save"
@@ -519,6 +611,37 @@ const CaminhaoHidrojato: React.FC<CaminhaoHidrojatoProps> = ({ onBack }) => {
           >
             Limpar
           </button>
+        </div>
+
+        <div className="mobile-form-navigation">
+          <button
+            type="button"
+            className="btn-secondary"
+            disabled={saving || currentStepIndex === 0}
+            onClick={goToPreviousMobileStep}
+          >
+            Voltar
+          </button>
+
+          {isLastMobileStep ? (
+            <button
+              type="button"
+              className="btn-primary btn-save"
+              disabled={saving}
+              onClick={() => void handleSave()}
+            >
+              {saving ? "Salvando..." : "Salvar OS"}
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={saving}
+              onClick={goToNextMobileStep}
+            >
+              Próximo
+            </button>
+          )}
         </div>
       </form>
 
