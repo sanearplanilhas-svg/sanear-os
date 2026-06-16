@@ -1407,6 +1407,139 @@ const Dashboard: React.FC = () => {
         </div>
       </header>
 
+      <div className="dashboard-mobile-command screen-only" aria-label="Resumo mobile do dashboard">
+        <div className="dashboard-mobile-period-bar">
+          <div>
+            <span>Período em análise</span>
+            <strong>{filterRangeLabel}</strong>
+          </div>
+          <button type="button" onClick={openFilter}>Filtrar</button>
+        </div>
+
+        <div className="dashboard-mobile-preset-row" aria-label="Filtros rápidos mobile">
+          {([
+            ["hoje", "Hoje"],
+            ["7dias", "7 dias"],
+            ["30dias", "30 dias"],
+            ["mes", "Mês"],
+            ["tudo", "Tudo"],
+          ] as const).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              className={`dashboard-mobile-preset ${currentPreset === value ? "is-active" : ""}`}
+              onClick={() => applyPreset(value)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        <div className="dashboard-mobile-kpi-strip">
+          <div className="dashboard-mobile-kpi is-total">
+            <span>Total</span>
+            <strong>{currentMetrics.totalPeriodo}</strong>
+            <small>no período</small>
+          </div>
+          <div className="dashboard-mobile-kpi is-open">
+            <span>Abertas</span>
+            <strong>{currentMetrics.abertasCount}</strong>
+            <small>em campo</small>
+          </div>
+          <div className="dashboard-mobile-kpi is-danger">
+            <span>Atraso</span>
+            <strong>{currentMetrics.atrasadasCount}</strong>
+            <small>SLA vencido</small>
+          </div>
+          <div className="dashboard-mobile-kpi is-success">
+            <span>Conclusão</span>
+            <strong>{currentMetrics.taxaConclusao}%</strong>
+            <small>resolvidas</small>
+          </div>
+        </div>
+
+        <div className="dashboard-mobile-status-card">
+          <div>
+            <span className="dashboard-mobile-status-label">Situação da operação</span>
+            <strong>
+              {currentMetrics.atrasadasCount > 0
+                ? "Atenção necessária"
+                : currentMetrics.atencaoCount > 0
+                  ? "Monitorar prazos"
+                  : "Operação controlada"}
+            </strong>
+            <small>
+              {currentMetrics.atrasadasCount > 0
+                ? `${currentMetrics.atrasadasCount} OS acima do SLA.`
+                : currentMetrics.atencaoCount > 0
+                  ? `${currentMetrics.atencaoCount} OS próximas do limite.`
+                  : "Nenhuma criticidade forte neste filtro."}
+            </small>
+          </div>
+          <div className="dashboard-mobile-status-meter">
+            <span style={{ width: `${Math.min(100, Math.max(8, currentMetrics.taxaConclusao))}%` }} />
+          </div>
+        </div>
+
+        <div className="dashboard-mobile-section-head">
+          <div>
+            <span>Serviços</span>
+            <strong>Escolha uma visão</strong>
+          </div>
+          <small>{activeTab === "geral" ? "Todos" : MODULE_CONFIG[activeTab].shortLabel}</small>
+        </div>
+
+        <div className="dashboard-mobile-module-rail" aria-label="Módulos operacionais">
+          <button
+            type="button"
+            className={`dashboard-mobile-module ${activeTab === "geral" ? "is-selected" : ""}`}
+            onClick={() => setActiveTab("geral")}
+          >
+            <span>📊</span>
+            <strong>Geral</strong>
+            <small>{generalMetrics.totalPeriodo} OS</small>
+          </button>
+          {moduleSummaries.map((summary) => (
+            <button
+              key={summary.key}
+              type="button"
+              className={`dashboard-mobile-module ${activeTab === summary.key ? "is-selected" : ""} ${summary.future ? "is-future" : ""}`}
+              onClick={() => setActiveTab(summary.key)}
+            >
+              <span>{summary.icon}</span>
+              <strong>{summary.shortLabel}</strong>
+              <small>{summary.future ? "Reservado" : `${summary.abertas} abertas`}</small>
+            </button>
+          ))}
+        </div>
+
+        <div className="dashboard-mobile-priority-panel">
+          <div className="dashboard-mobile-section-head dashboard-mobile-section-head--inside">
+            <div>
+              <span>Campo</span>
+              <strong>Prioridades rápidas</strong>
+            </div>
+            <small>{currentMetrics.attentionItems.length}</small>
+          </div>
+          {currentMetrics.attentionItems.length === 0 ? (
+            <div className="dashboard-mobile-empty-state">Nenhuma OS crítica para este filtro.</div>
+          ) : (
+            <div className="dashboard-mobile-priority-list">
+              {currentMetrics.attentionItems.slice(0, 3).map((item) => (
+                <div key={item.id} className={`dashboard-mobile-priority is-${item.severity}`}>
+                  <div>
+                    <strong>{item.moduleLabel}</strong>
+                    <span>{item.title}</span>
+                    <small>{item.location}</small>
+                  </div>
+                  <b>{Math.round(item.hours)}h</b>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
       <div className="dashboard-toolbar screen-only">
         <div className="dashboard-presets" aria-label="Filtros rápidos de período">
           {([

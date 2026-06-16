@@ -1691,6 +1691,56 @@ async function handleSaveDetails() {
     boxShadow: "0 1px 0 rgba(0,0,0,0.08)",
   };
 
+  function getMobileStatusLabel(os: FirestoreOS): string {
+    const status = normalizeStatus(os.status);
+
+    if (status === "AGUARDANDO_SANEAR") return "Aguardando SANEAR";
+    if (status.startsWith("CONCLU")) return "Finalizada";
+    if (status.startsWith("CANCEL")) return "Cancelada";
+    if (status.startsWith("FECH") || status.startsWith("ENCERR")) return "Fechada";
+    if (os.dataExecucao) return "Executada";
+    return "Aberta";
+  }
+
+  function getMobileStatusClass(os: FirestoreOS): string {
+    const status = normalizeStatus(os.status);
+
+    if (status === "AGUARDANDO_SANEAR") return "is-waiting";
+    if (status.startsWith("CONCLU") || status.startsWith("FECH") || status.startsWith("ENCERR") || os.dataExecucao) {
+      return "is-done";
+    }
+    if (status.startsWith("CANCEL")) return "is-canceled";
+    return "is-open";
+  }
+
+  function getMobileTipoClass(os: FirestoreOS): string {
+    const tipo = normalizeTipoOs(os);
+    if (tipo === "BURACO_RUA") return "is-calcamento";
+    if (tipo === "ASFALTO") return "is-asfalto";
+    if (tipo === "HIDROJATO") return "is-hidrojato";
+    if (tipo === "ESGOTO_RETORNANDO") return "is-esgoto-retornando";
+    if (tipo === "ESGOTO_ENTUPIDO") return "is-esgoto-entupido";
+    return "is-default";
+  }
+
+  function getMobileAddress(os: FirestoreOS): string {
+    const rua = os.rua?.trim() || "Rua não informada";
+    const numero = os.numero?.trim();
+    const bairro = os.bairro?.trim();
+
+    return [rua + (numero ? `, Nº ${numero}` : ""), bairro].filter(Boolean).join(" · ");
+  }
+
+  function getMobileProtocolLine(os: FirestoreOS): string {
+    const protocolo = os.protocolo?.trim();
+    const numeroOs = os.ordemServico?.trim();
+
+    if (protocolo && numeroOs) return `Protocolo ${protocolo} · OS ${numeroOs}`;
+    if (numeroOs) return `OS ${numeroOs}`;
+    if (protocolo) return `Protocolo ${protocolo}`;
+    return "Sem protocolo/OS informado";
+  }
+
   return (
     <section className="page-card">
       <style>{`
@@ -1944,104 +1994,221 @@ async function handleSaveDetails() {
         )}
 
         {!loading && filtradas.length > 0 && (
-          <div className="os-table-wrapper" style={{ overflow: "auto", maxHeight: "70vh" }}>
-            <table className="os-table">
-              <thead style={{ position: "sticky", top: 0, zIndex: 9, background: "#fff" }}>
-                <tr>
-                  <th style={stickyHeaderCellStyle}>Nº OS</th>
-                  <th style={stickyHeaderCellStyle}>Tipo</th>
-                  <th style={stickyHeaderCellStyle}>Bairro</th>
-                  <th style={stickyHeaderCellStyle}>Rua / Avenida</th>
-                  <th style={stickyHeaderCellStyle}>Dados da OS</th>
-                  <th style={stickyHeaderCellStyle}>Data de criação</th>
-                  <th style={stickyHeaderCellStyle}>Data de execução</th>
-                  <th style={stickyHeaderCellStyle}>Ações</th>
-                </tr>
-              </thead>
+          <>
+            <div className="os-table-wrapper os-table-wrapper-desktop" style={{ overflow: "auto", maxHeight: "70vh" }}>
+              <table className="os-table">
+                <thead style={{ position: "sticky", top: 0, zIndex: 9, background: "#fff" }}>
+                  <tr>
+                    <th style={stickyHeaderCellStyle}>Nº OS</th>
+                    <th style={stickyHeaderCellStyle}>Tipo</th>
+                    <th style={stickyHeaderCellStyle}>Bairro</th>
+                    <th style={stickyHeaderCellStyle}>Rua / Avenida</th>
+                    <th style={stickyHeaderCellStyle}>Dados da OS</th>
+                    <th style={stickyHeaderCellStyle}>Data de criação</th>
+                    <th style={stickyHeaderCellStyle}>Data de execução</th>
+                    <th style={stickyHeaderCellStyle}>Ações</th>
+                  </tr>
+                </thead>
 
-              <tbody>
-                {filtradas.map((os) => {
-                  const qtdAbertura = normalizeFotos(os.fotos).length;
-                  const qtdExecucao = normalizeFotos(os.fotosExecucao).length;
-                  const totalFotos = qtdAbertura + qtdExecucao;
-                  const osKey = `${os.origem}:${os.id}`;
-                  const isBlink = highlightRowKey === osKey;
+                <tbody>
+                  {filtradas.map((os) => {
+                    const qtdAbertura = normalizeFotos(os.fotos).length;
+                    const qtdExecucao = normalizeFotos(os.fotosExecucao).length;
+                    const totalFotos = qtdAbertura + qtdExecucao;
+                    const osKey = `${os.origem}:${os.id}`;
+                    const isBlink = highlightRowKey === osKey;
 
-                  return (
-                    <tr
-                      key={osKey}
-                      data-os-key={osKey}
-                      className={`os-table-row ${isBlink ? "os-table-row--blink" : ""}`}
-                      onClick={() => {
-                        setDetailsModalOs(os);
-                        setIsEditingDetails(false);
-                      }}
-                      style={{ cursor: "pointer" }}
-                    >
-                      <td>{os.ordemServico || os.protocolo || "-"}</td>
-                      <td>{getTipoOsLabel(os)}</td>
-                      <td>{os.bairro || "-"}</td>
-                      <td>{os.rua || "-"}</td>
-                      <td>
-                        <div className="os-row-actions">
-                          <button
-                            type="button"
-                            className="btn-secondary"
-                            onClick={(event) => handleOpenPdfModal(os, event)}
-                          >
-                            Abrir PDF
-                          </button>
+                    return (
+                      <tr
+                        key={osKey}
+                        data-os-key={osKey}
+                        className={`os-table-row ${isBlink ? "os-table-row--blink" : ""}`}
+                        onClick={() => {
+                          setDetailsModalOs(os);
+                          setIsEditingDetails(false);
+                        }}
+                        style={{ cursor: "pointer" }}
+                      >
+                        <td>{os.ordemServico || os.protocolo || "-"}</td>
+                        <td>{getTipoOsLabel(os)}</td>
+                        <td>{os.bairro || "-"}</td>
+                        <td>{os.rua || "-"}</td>
+                        <td>
+                          <div className="os-row-actions">
+                            <button
+                              type="button"
+                              className="btn-secondary"
+                              onClick={(event) => handleOpenPdfModal(os, event)}
+                            >
+                              Abrir PDF
+                            </button>
+                          </div>
+                        </td>
+                        <td>{formatDateTime(os.createdAt)}</td>
+                        <td>
+                          <div>{formatDateTime(os.dataExecucao)}</div>
+                          {os.origem === "hidrojato" && (
+                            <small>{getCaminhaoExecucaoLabel(os)}</small>
+                          )}
+                        </td>
+                        <td>
+                          <div className="os-row-actions" style={{ gap: "0.5rem" }}>
+                            <button
+                              type="button"
+                              className="btn-secondary"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                openPhotoModalFromRow(os);
+                              }}
+                            >
+                              Ver fotos{totalFotos > 0 ? ` (${totalFotos})` : ""}
+                            </button>
+
+                            <button
+                              type="button"
+                              className="btn-secondary"
+                              style={!canEditOs(os) ? { opacity: 0.65 } : undefined}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                setDetailsModalOs(os);
+
+                                if (canEditOs(os)) {
+                                  setIsEditingDetails(true);
+                                } else {
+                                  setIsEditingDetails(false);
+                                  openAlertModal(
+                                    "Sem permissão",
+                                    "Você não tem permissão para editar esta OS."
+                                  );
+                                }
+                              }}
+                            >
+                              Editar
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="os-mobile-list" aria-label="Lista de ordens de serviço em cartões">
+              {filtradas.map((os) => {
+                const qtdAbertura = normalizeFotos(os.fotos).length;
+                const qtdExecucao = normalizeFotos(os.fotosExecucao).length;
+                const totalFotos = qtdAbertura + qtdExecucao;
+                const osKey = `${os.origem}:${os.id}`;
+                const isBlink = highlightRowKey === osKey;
+                const canEdit = canEditOs(os);
+
+                return (
+                  <article
+                    key={`mobile-${osKey}`}
+                    data-os-key={osKey}
+                    className={`os-mobile-card ${getMobileTipoClass(os)} ${isBlink ? "os-mobile-card--blink" : ""}`}
+                    onClick={() => {
+                      setDetailsModalOs(os);
+                      setIsEditingDetails(false);
+                    }}
+                  >
+                    <div className="os-mobile-card-topline">
+                      <span className={`os-mobile-type ${getMobileTipoClass(os)}`}>
+                        {getTipoOsLabel(os)}
+                      </span>
+                      <span className={`os-mobile-status ${getMobileStatusClass(os)}`}>
+                        {getMobileStatusLabel(os)}
+                      </span>
+                    </div>
+
+                    <div className="os-mobile-card-main">
+                      <div>
+                        <h3>{os.ordemServico || os.protocolo || "OS sem número"}</h3>
+                        <p>{getMobileProtocolLine(os)}</p>
+                      </div>
+
+                      {hasAttachedPdf(os) ? (
+                        <span className="os-mobile-pdf-tag">PDF anexado</span>
+                      ) : (
+                        <span className="os-mobile-pdf-tag is-fallback">PDF gerado</span>
+                      )}
+                    </div>
+
+                    <div className="os-mobile-location">
+                      <span>📍</span>
+                      <p>{getMobileAddress(os)}</p>
+                    </div>
+
+                    {os.pontoReferencia && (
+                      <div className="os-mobile-reference">
+                        <strong>Referência:</strong> {os.pontoReferencia}
+                      </div>
+                    )}
+
+                    <div className="os-mobile-meta-grid">
+                      <div>
+                        <span>Criada</span>
+                        <strong>{formatDateTime(os.createdAt)}</strong>
+                      </div>
+                      <div>
+                        <span>Execução</span>
+                        <strong>{formatDateTime(os.dataExecucao)}</strong>
+                      </div>
+                      {os.origem === "hidrojato" && (
+                        <div>
+                          <span>Caminhão</span>
+                          <strong>{getCaminhaoExecucaoLabel(os)}</strong>
                         </div>
-                      </td>
-                      <td>{formatDateTime(os.createdAt)}</td>
-                      <td>
-                        <div>{formatDateTime(os.dataExecucao)}</div>
-                        {os.origem === "hidrojato" && (
-                          <small>{getCaminhaoExecucaoLabel(os)}</small>
-                        )}
-                      </td>
-                      <td>
-                        <div className="os-row-actions" style={{ gap: "0.5rem" }}>
-                          <button
-                            type="button"
-                            className="btn-secondary"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              openPhotoModalFromRow(os);
-                            }}
-                          >
-                            Ver fotos{totalFotos > 0 ? ` (${totalFotos})` : ""}
-                          </button>
+                      )}
+                    </div>
 
-                          <button
-                            type="button"
-                            className="btn-secondary"
-                            style={!canEditOs(os) ? { opacity: 0.65 } : undefined}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              setDetailsModalOs(os);
+                    <div className="os-mobile-actions">
+                      <button
+                        type="button"
+                        className="btn-primary"
+                        onClick={(event) => handleOpenPdfModal(os, event)}
+                      >
+                        Abrir PDF
+                      </button>
 
-                              if (canEditOs(os)) {
-                                setIsEditingDetails(true);
-                              } else {
-                                setIsEditingDetails(false);
-                                openAlertModal(
-                                  "Sem permissão",
-                                  "Você não tem permissão para editar esta OS."
-                                );
-                              }
-                            }}
-                          >
-                            Editar
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          openPhotoModalFromRow(os);
+                        }}
+                      >
+                        Fotos{totalFotos > 0 ? ` (${totalFotos})` : ""}
+                      </button>
+
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setDetailsModalOs(os);
+
+                          if (canEdit) {
+                            setIsEditingDetails(true);
+                          } else {
+                            setIsEditingDetails(false);
+                            openAlertModal(
+                              "Sem permissão",
+                              "Você não tem permissão para editar esta OS."
+                            );
+                          }
+                        }}
+                      >
+                        {canEdit ? "Editar" : "Dados"}
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          </>
         )}
       </div>
 

@@ -213,6 +213,7 @@ const App: React.FC = () => {
   // ==== NOTIFICAÇÕES (feed) ====
   const [notifOpen, setNotifOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [mobileSheet, setMobileSheet] = useState<null | "nova" | "mais">(null);
 
   const [createdBuraco, setCreatedBuraco] = useState<NotifItem[]>([]);
   const [createdAsfalto, setCreatedAsfalto] = useState<NotifItem[]>([]);
@@ -304,6 +305,41 @@ const App: React.FC = () => {
     emphasis?: "normal" | "primary" | "warning";
   };
 
+  type MobileNavButtonProps = {
+    menu: MenuKey;
+    icon: string;
+    label: string;
+    badge?: string | number;
+  };
+
+  function navigate(menu: MenuKey) {
+    setActiveMenu(menu);
+    setMobileSheet(null);
+    setNotifOpen(false);
+    setUserMenuOpen(false);
+  }
+
+  function MobileNavButton({ menu, icon, label, badge }: MobileNavButtonProps) {
+    const active = activeMenu === menu;
+
+    return (
+      <button
+        type="button"
+        className={`mobile-nav-btn ${active ? "active" : ""}`}
+        onClick={() => navigate(menu)}
+        aria-label={label}
+      >
+        <span className="mobile-nav-icon" aria-hidden="true">
+          {icon}
+        </span>
+        <span className="mobile-nav-label">{label}</span>
+        {badge !== undefined && badge !== null && badge !== "" && (
+          <span className="mobile-nav-badge">{badge}</span>
+        )}
+      </button>
+    );
+  }
+
   function SidebarItem({
     menu,
     icon,
@@ -318,7 +354,7 @@ const App: React.FC = () => {
       <button
         type="button"
         className={`sidebar-link ${active ? "active" : ""} sidebar-link-${emphasis}`}
-        onClick={() => setActiveMenu(menu)}
+        onClick={() => navigate(menu)}
         title={subtitle ? `${title} - ${subtitle}` : title}
       >
         <span className="sidebar-link-left">
@@ -1336,7 +1372,7 @@ useEffect(() => {
                 className="user2-item"
                 onClick={() => {
                   setUserMenuOpen(false);
-                  setActiveMenu("usuario");
+                  navigate("usuario");
                 }}
               >
                 👤 Perfil &amp; Acesso
@@ -1359,6 +1395,169 @@ useEffect(() => {
 
         <div className="page-wrapper">{renderContent()}</div>
       </main>
+
+      <nav className="mobile-bottom-nav" aria-label="Navegação principal no celular">
+        {isTerceirizada ? (
+          <>
+            <MobileNavButton menu="terceirizada" icon="🤝" label="Área" />
+            <button
+              type="button"
+              className="mobile-nav-btn"
+              onClick={() => {
+                setNotifOpen((current) => !current);
+                setUserMenuOpen(false);
+                setMobileSheet(null);
+              }}
+              aria-label="Notificações"
+            >
+              <span className="mobile-nav-icon" aria-hidden="true">🔔</span>
+              <span className="mobile-nav-label">Avisos</span>
+              {unreadCount > 0 && (
+                <span className="mobile-nav-badge">
+                  {unreadCount > 99 ? "99+" : unreadCount}
+                </span>
+              )}
+            </button>
+            <button
+              type="button"
+              className="mobile-nav-btn"
+              onClick={handleLogout}
+              aria-label="Sair"
+            >
+              <span className="mobile-nav-icon" aria-hidden="true">🚪</span>
+              <span className="mobile-nav-label">Sair</span>
+            </button>
+          </>
+        ) : (
+          <>
+            <MobileNavButton
+              menu="dashboard"
+              icon="📊"
+              label="Painel"
+              badge={unreadCount > 0 ? unreadCount > 99 ? "99+" : unreadCount : undefined}
+            />
+            <MobileNavButton menu="listaOS" icon="📋" label="OS" />
+            <button
+              type="button"
+              className={`mobile-nav-fab ${mobileSheet === "nova" ? "active" : ""}`}
+              onClick={() => {
+                setNotifOpen(false);
+                setUserMenuOpen(false);
+                setMobileSheet((current) => (current === "nova" ? null : "nova"));
+              }}
+              aria-label="Abrir nova ordem de serviço"
+            >
+              <span aria-hidden="true">＋</span>
+              <strong>Nova</strong>
+            </button>
+            <MobileNavButton menu="servico_sanear" icon="🛠️" label="SANEAR" />
+            <button
+              type="button"
+              className={`mobile-nav-btn ${mobileSheet === "mais" ? "active" : ""}`}
+              onClick={() => {
+                setNotifOpen(false);
+                setUserMenuOpen(false);
+                setMobileSheet((current) => (current === "mais" ? null : "mais"));
+              }}
+              aria-label="Mais opções"
+            >
+              <span className="mobile-nav-icon" aria-hidden="true">☰</span>
+              <span className="mobile-nav-label">Mais</span>
+            </button>
+          </>
+        )}
+      </nav>
+
+      {mobileSheet && !isTerceirizada && (
+        <div className="mobile-sheet-backdrop" onClick={() => setMobileSheet(null)}>
+          <section
+            className="mobile-sheet"
+            role="dialog"
+            aria-modal="true"
+            aria-label={mobileSheet === "nova" ? "Nova ordem de serviço" : "Mais opções"}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="mobile-sheet-handle" aria-hidden="true" />
+            <div className="mobile-sheet-header">
+              <div>
+                <span className="mobile-sheet-eyebrow">SANEAR Operacional</span>
+                <h2>{mobileSheet === "nova" ? "Abrir nova OS" : "Menu rápido"}</h2>
+              </div>
+              <button
+                type="button"
+                className="mobile-sheet-close"
+                onClick={() => setMobileSheet(null)}
+                aria-label="Fechar menu"
+              >
+                ×
+              </button>
+            </div>
+
+            {mobileSheet === "nova" ? (
+              <div className="mobile-sheet-grid mobile-sheet-grid-services">
+                <button type="button" className="mobile-sheet-card" onClick={() => navigate("buraco")}>
+                  <span>🧱</span>
+                  <strong>Calçamento</strong>
+                  <small>Buraco na rua</small>
+                </button>
+                <button type="button" className="mobile-sheet-card" onClick={() => navigate("asfalto")}>
+                  <span>🛣️</span>
+                  <strong>Asfalto</strong>
+                  <small>Reparo e tapa-buraco</small>
+                </button>
+                <button type="button" className="mobile-sheet-card mobile-sheet-card-featured" onClick={() => navigate("hidrojato")}>
+                  <span>🚛</span>
+                  <strong>Hidrojato</strong>
+                  <small>Serviço interno SANEAR</small>
+                </button>
+                <button type="button" className="mobile-sheet-card" onClick={() => navigate("esgoto_entupido")}>
+                  <span>🚧</span>
+                  <strong>Esgoto entupido</strong>
+                  <small>Rede obstruída</small>
+                </button>
+                <button type="button" className="mobile-sheet-card" onClick={() => navigate("esgoto_retornando")}>
+                  <span>💧</span>
+                  <strong>Esgoto retornando</strong>
+                  <small>Retorno no imóvel</small>
+                </button>
+              </div>
+            ) : (
+              <div className="mobile-sheet-list">
+                <button type="button" className="mobile-sheet-row" onClick={() => navigate("dashboard")}>
+                  <span>📊</span>
+                  <strong>Dashboard</strong>
+                  <small>Visão geral da operação</small>
+                </button>
+                <button type="button" className="mobile-sheet-row" onClick={() => navigate("listaOS")}>
+                  <span>📋</span>
+                  <strong>Lista de OS</strong>
+                  <small>Consultar, abrir PDF e acompanhar</small>
+                </button>
+                <button type="button" className="mobile-sheet-row" onClick={() => navigate("terceirizada")}>
+                  <span>🤝</span>
+                  <strong>Área da Terceirizada</strong>
+                  <small>Serviços externos</small>
+                </button>
+                <button type="button" className="mobile-sheet-row" onClick={() => navigate("usuario")}>
+                  <span>👤</span>
+                  <strong>Usuário</strong>
+                  <small>Perfil e nível de acesso</small>
+                </button>
+                <button type="button" className="mobile-sheet-row" onClick={() => navigate("backup")}>
+                  <span>🗄️</span>
+                  <strong>Backup</strong>
+                  <small>Exportação segura dos dados</small>
+                </button>
+                <button type="button" className="mobile-sheet-row mobile-sheet-row-danger" onClick={handleLogout}>
+                  <span>🚪</span>
+                  <strong>Sair</strong>
+                  <small>Encerrar sessão neste aparelho</small>
+                </button>
+              </div>
+            )}
+          </section>
+        </div>
+      )}
     </div>
   );
 };
