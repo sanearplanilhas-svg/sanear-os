@@ -26,6 +26,7 @@ import CaminhaoHidrojato from "./pages/CaminhaoHidrojato";
 import EsgotoEntupido from "./pages/EsgotoEntupido";
 import EsgotoRetornando from "./pages/EsgotoRetornando";
 import TerceirizadaVisao from "./pages/TerceirizadaVisao";
+import ServicoSanearVisao from "./pages/ServicoSanearVisao";
 import Usuario from "./pages/Usuario";
 import Dashboard from "./pages/Dashboard";
 import ListaOrdensServico from "./pages/ListaOrdensServico";
@@ -39,6 +40,7 @@ type MenuKey =
   | "esgoto_entupido"
   | "esgoto_retornando"
   | "terceirizada"
+  | "servico_sanear"
   | "usuario"
   | "listaOS"
   | "backup";
@@ -51,8 +53,8 @@ type NotifItem = {
   id: string; // único
   kind: NotifKind;
   osId: string;
-  collectionName: "ordens_servico" | "ordensServico";
-  origemLabel: "Calçamento" | "Asfalto";
+  collectionName: "ordens_servico" | "ordensServico" | "ordensHidrojato";
+  origemLabel: "Calçamento" | "Asfalto" | "Hidrojato";
   numero: string;
   tsMillis: number;
   message: string;
@@ -69,14 +71,17 @@ function normalizeText(value?: string | null): string {
 
 function inferOrigemLabel(
   tipo: any,
-  fallback: "Calçamento" | "Asfalto"
-): "Calçamento" | "Asfalto" {
+  fallback: "Calçamento" | "Asfalto" | "Hidrojato"
+): "Calçamento" | "Asfalto" | "Hidrojato" {
   const t = normalizeText(typeof tipo === "string" ? tipo : "");
   if (t.includes("BURACO") || t.includes("CALCAMENTO") || t === "BURACO_RUA") {
     return "Calçamento";
   }
   if (t.includes("ASFALTO") || t === "ASFALTO") {
     return "Asfalto";
+  }
+  if (t.includes("HIDROJATO") || t === "HIDROJATO") {
+    return "Hidrojato";
   }
   return fallback;
 }
@@ -119,6 +124,8 @@ function getMenuMeta(menu: MenuKey): { title: string; section: string } {
       return { title: "Lista de Ordens de Serviço", section: "Operacional" };
     case "terceirizada":
       return { title: "Visão da Terceirizada", section: "Terceirizada" };
+    case "servico_sanear":
+      return { title: "Área de Serviço SANEAR", section: "Serviço SANEAR" };
     case "usuario":
       return { title: "Usuário", section: "Configurações" };
     case "backup":
@@ -167,8 +174,10 @@ const App: React.FC = () => {
 
   const [createdBuraco, setCreatedBuraco] = useState<NotifItem[]>([]);
   const [createdAsfalto, setCreatedAsfalto] = useState<NotifItem[]>([]);
+  const [createdHidrojato, setCreatedHidrojato] = useState<NotifItem[]>([]);
   const [concludedBuraco, setConcludedBuraco] = useState<NotifItem[]>([]);
   const [concludedAsfalto, setConcludedAsfalto] = useState<NotifItem[]>([]);
+  const [concludedHidrojato, setConcludedHidrojato] = useState<NotifItem[]>([]);
 
   // Marca d’água baseada em timestamps do Firestore (mitiga drift de relógio do cliente)
   const [serverNowMs, setServerNowMs] = useState<number>(Date.now());
@@ -178,8 +187,10 @@ const App: React.FC = () => {
     const all = [
       ...createdBuraco,
       ...createdAsfalto,
+      ...createdHidrojato,
       ...concludedBuraco,
       ...concludedAsfalto,
+      ...concludedHidrojato,
     ];
 
     // remove duplicados por id
@@ -187,7 +198,7 @@ const App: React.FC = () => {
     for (const n of all) map.set(n.id, n);
 
     return Array.from(map.values()).sort((a, b) => b.tsMillis - a.tsMillis);
-  }, [createdBuraco, createdAsfalto, concludedBuraco, concludedAsfalto]);
+  }, [createdBuraco, createdAsfalto, createdHidrojato, concludedBuraco, concludedAsfalto, concludedHidrojato]);
 
   const unreadCount = notifications.length;
 
@@ -199,6 +210,90 @@ const App: React.FC = () => {
     "Usuário";
 
   const userInitial = (userDisplayName || "U").trim().charAt(0).toUpperCase();
+
+  const [sidebarClock, setSidebarClock] = useState(() => new Date());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setSidebarClock(new Date()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const isTerceirizada = simulatedRole === "terceirizada";
+
+  const roleLabel = useMemo(() => {
+    switch (simulatedRole) {
+      case "adm":
+        return "Administrador";
+      case "diretor":
+        return "Diretor";
+      case "terceirizada":
+        return "Terceirizada";
+      default:
+        return "Operador";
+    }
+  }, [simulatedRole]);
+
+  const sidebarDate = useMemo(
+    () =>
+      sidebarClock.toLocaleDateString("pt-BR", {
+        weekday: "short",
+        day: "2-digit",
+        month: "2-digit",
+      }),
+    [sidebarClock]
+  );
+
+  const sidebarTime = useMemo(
+    () =>
+      sidebarClock.toLocaleTimeString("pt-BR", {
+        hour: "2-digit",
+        minute: "2-digit",
+      }),
+    [sidebarClock]
+  );
+
+  type SidebarItemProps = {
+    menu: MenuKey;
+    icon: string;
+    title: string;
+    subtitle?: string;
+    badge?: string | number;
+    emphasis?: "normal" | "primary" | "warning";
+  };
+
+  function SidebarItem({
+    menu,
+    icon,
+    title,
+    subtitle,
+    badge,
+    emphasis = "normal",
+  }: SidebarItemProps) {
+    const active = activeMenu === menu;
+
+    return (
+      <button
+        type="button"
+        className={`sidebar-link ${active ? "active" : ""} sidebar-link-${emphasis}`}
+        onClick={() => setActiveMenu(menu)}
+        title={subtitle ? `${title} - ${subtitle}` : title}
+      >
+        <span className="sidebar-link-left">
+          <span className="sidebar-link-icon" aria-hidden="true">
+            {icon}
+          </span>
+          <span className="sidebar-link-text">
+            <span className="sidebar-link-title">{title}</span>
+            {subtitle && <span className="sidebar-link-subtitle">{subtitle}</span>}
+          </span>
+        </span>
+
+        {badge !== undefined && badge !== null && badge !== "" && (
+          <span className="sidebar-link-badge">{badge}</span>
+        )}
+      </button>
+    );
+  }
 
 
   // Mantém uma aproximação do "agora" do servidor a partir dos últimos registros gravados.
@@ -250,6 +345,23 @@ const App: React.FC = () => {
       (err) => console.error("ServerNow created ordensServico:", err)
     );
 
+    const qLatestCreatedHidrojato = query(
+      collection(db, "ordensHidrojato"),
+      where("createdAt", ">", zeroTs),
+      orderBy("createdAt", "desc"),
+      limit(1)
+    );
+
+    const u3 = onSnapshot(
+      qLatestCreatedHidrojato,
+      (snap) => {
+        const d = snap.docs[0];
+        const ts = (d?.data() as any)?.createdAt as Timestamp | null | undefined;
+        update(ts?.toMillis?.());
+      },
+      (err) => console.error("ServerNow created ordensHidrojato:", err)
+    );
+
     const qLatestExecBuraco = query(
       collection(db, "ordens_servico"),
       where("dataExecucao", ">", zeroTs),
@@ -257,7 +369,7 @@ const App: React.FC = () => {
       limit(1)
     );
 
-    const u3 = onSnapshot(
+    const u4 = onSnapshot(
       qLatestExecBuraco,
       (snap) => {
         const d = snap.docs[0];
@@ -274,7 +386,7 @@ const App: React.FC = () => {
       limit(1)
     );
 
-    const u4 = onSnapshot(
+    const u5 = onSnapshot(
       qLatestExecAsfalto,
       (snap) => {
         const d = snap.docs[0];
@@ -284,11 +396,30 @@ const App: React.FC = () => {
       (err) => console.error("ServerNow exec ordensServico:", err)
     );
 
+    const qLatestExecHidrojato = query(
+      collection(db, "ordensHidrojato"),
+      where("dataExecucao", ">", zeroTs),
+      orderBy("dataExecucao", "desc"),
+      limit(1)
+    );
+
+    const u6 = onSnapshot(
+      qLatestExecHidrojato,
+      (snap) => {
+        const d = snap.docs[0];
+        const ts = (d?.data() as any)?.dataExecucao as Timestamp | null | undefined;
+        update(ts?.toMillis?.());
+      },
+      (err) => console.error("ServerNow exec ordensHidrojato:", err)
+    );
+
     return () => {
       u1();
       u2();
       u3();
       u4();
+      u5();
+      u6();
     };
   }, [user]);
 
@@ -354,6 +485,12 @@ const App: React.FC = () => {
     }
   }, []);
 
+  useEffect(() => {
+    if (simulatedRole === "terceirizada" && activeMenu !== "terceirizada") {
+      setActiveMenu("terceirizada");
+    }
+  }, [simulatedRole, activeMenu]);
+
   // Fecha popovers ao clicar fora
 useEffect(() => {
   if (!notifOpen && !userMenuOpen) return;
@@ -387,16 +524,18 @@ useEffect(() => {
       localStorage.setItem(seenKey, String(serverNowRef.current || serverNowMs || Date.now()));
       setCreatedBuraco([]);
       setCreatedAsfalto([]);
+      setCreatedHidrojato([]);
       setConcludedBuraco([]);
       setConcludedAsfalto([]);
+      setConcludedHidrojato([]);
       return;
     }
 
     const lastSeenTs = Timestamp.fromMillis(lastSeenMs);
 
     const buildCreatedNotifs = (
-      colName: "ordens_servico" | "ordensServico",
-      fallbackOrigem: "Calçamento" | "Asfalto",
+      colName: "ordens_servico" | "ordensServico" | "ordensHidrojato",
+      fallbackOrigem: "Calçamento" | "Asfalto" | "Hidrojato",
       snap: any
     ) => {
       const items: NotifItem[] = snap.docs.map((d: any) => {
@@ -422,8 +561,8 @@ useEffect(() => {
     };
 
     const buildConcludedNotifs = (
-      colName: "ordens_servico" | "ordensServico",
-      fallbackOrigem: "Calçamento" | "Asfalto",
+      colName: "ordens_servico" | "ordensServico" | "ordensHidrojato",
+      fallbackOrigem: "Calçamento" | "Asfalto" | "Hidrojato",
       snap: any
     ) => {
       const items: NotifItem[] = snap.docs.map((d: any) => {
@@ -467,6 +606,13 @@ useEffect(() => {
       limit(20)
     );
 
+    const qCreatedHidrojato = query(
+      collection(db, "ordensHidrojato"),
+      where("createdAt", ">", lastSeenTs),
+      orderBy("createdAt", "desc"),
+      limit(20)
+    );
+
     // CONCLUÍDAS (usa dataExecucao como “evento de conclusão”)
     const qConcludedBuraco = query(
       collection(db, "ordens_servico"),
@@ -477,6 +623,13 @@ useEffect(() => {
 
     const qConcludedAsfalto = query(
       collection(db, "ordensServico"),
+      where("dataExecucao", ">", lastSeenTs),
+      orderBy("dataExecucao", "desc"),
+      limit(20)
+    );
+
+    const qConcludedHidrojato = query(
+      collection(db, "ordensHidrojato"),
       where("dataExecucao", ">", lastSeenTs),
       orderBy("dataExecucao", "desc"),
       limit(20)
@@ -495,15 +648,27 @@ useEffect(() => {
     );
 
     const u3 = onSnapshot(
+      qCreatedHidrojato,
+      (snap) => setCreatedHidrojato(buildCreatedNotifs("ordensHidrojato", "Hidrojato", snap)),
+      (err) => console.error("Notif created ordensHidrojato:", err)
+    );
+
+    const u4 = onSnapshot(
       qConcludedBuraco,
       (snap) => setConcludedBuraco(buildConcludedNotifs("ordens_servico", "Calçamento", snap)),
       (err) => console.error("Notif concluded ordens_servico:", err)
     );
 
-    const u4 = onSnapshot(
+    const u5 = onSnapshot(
       qConcludedAsfalto,
       (snap) => setConcludedAsfalto(buildConcludedNotifs("ordensServico", "Asfalto", snap)),
       (err) => console.error("Notif concluded ordensServico:", err)
+    );
+
+    const u6 = onSnapshot(
+      qConcludedHidrojato,
+      (snap) => setConcludedHidrojato(buildConcludedNotifs("ordensHidrojato", "Hidrojato", snap)),
+      (err) => console.error("Notif concluded ordensHidrojato:", err)
     );
 
     return () => {
@@ -511,6 +676,8 @@ useEffect(() => {
       u2();
       u3();
       u4();
+      u5();
+      u6();
     };
   }, [user, serverNowMs]);
 
@@ -526,8 +693,10 @@ useEffect(() => {
 
     setCreatedBuraco([]);
     setCreatedAsfalto([]);
+    setCreatedHidrojato([]);
     setConcludedBuraco([]);
     setConcludedAsfalto([]);
+    setConcludedHidrojato([]);
     setNotifOpen(false);
   }
 
@@ -579,8 +748,10 @@ useEffect(() => {
       setNotifOpen(false);
       setCreatedBuraco([]);
       setCreatedAsfalto([]);
+      setCreatedHidrojato([]);
       setConcludedBuraco([]);
       setConcludedAsfalto([]);
+      setConcludedHidrojato([]);
 
       if (typeof window !== "undefined") {
         window.sessionStorage.removeItem("sanear-active-menu");
@@ -591,6 +762,10 @@ useEffect(() => {
   }
 
   function renderContent() {
+    if (simulatedRole === "terceirizada" && activeMenu !== "terceirizada") {
+      return <TerceirizadaVisao />;
+    }
+
     switch (activeMenu) {
       case "dashboard":
         return <Dashboard />;
@@ -599,13 +774,15 @@ useEffect(() => {
       case "asfalto":
         return <Asfalto onBack={() => setActiveMenu("dashboard")} />;
       case "hidrojato":
-        return <CaminhaoHidrojato />;
+        return <CaminhaoHidrojato onBack={() => setActiveMenu("dashboard")} />;
       case "esgoto_entupido":
         return <EsgotoEntupido />;
       case "esgoto_retornando":
         return <EsgotoRetornando />;
       case "terceirizada":
         return <TerceirizadaVisao />;
+      case "servico_sanear":
+        return <ServicoSanearVisao />;
       case "usuario":
         return <Usuario />;
       case "listaOS":
@@ -811,118 +988,144 @@ useEffect(() => {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="sidebar-brand">
-          <div className="sidebar-logo-circle">S</div>
+        <div className="sidebar-brand sidebar-brand-modern">
+          <div className="sidebar-logo-circle sidebar-logo-modern">S</div>
           <div className="sidebar-brand-text">
-            <h1>Sanear Operacional</h1>
-            <span>Gestão de Ordens de Serviço</span>
+            <h1>SANEAR</h1>
+            <span>Operacional</span>
+          </div>
+          <span className="sidebar-live-dot" title="Sistema online" aria-label="Sistema online" />
+        </div>
+
+        <div className="sidebar-user-card">
+          <div className="sidebar-user-main">
+            <div className="sidebar-user-avatar">{userInitial}</div>
+            <div className="sidebar-user-info">
+              <strong title={userDisplayName}>{userDisplayName}</strong>
+              <span>{roleLabel}</span>
+            </div>
+          </div>
+
+          <div className="sidebar-clock-card" aria-label="Data e hora atual">
+            <span>{sidebarDate.replace(".", "")}</span>
+            <strong>{sidebarTime}</strong>
           </div>
         </div>
 
-        <div>
-          <p className="sidebar-section-title">Visão geral</p>
-          <div className="sidebar-nav">
-            <button
-              type="button"
-              className={`sidebar-link ${activeMenu === "dashboard" ? "active" : ""}`}
-              onClick={() => setActiveMenu("dashboard")}
-            >
-              <span>Dashboard</span>
-              <small>Resumo</small>
-            </button>
+        <div className="sidebar-scroll-area">
+          <div className="sidebar-block sidebar-block-highlight">
+            <p className="sidebar-section-title">Central</p>
+            <div className="sidebar-nav">
+              <SidebarItem
+                menu="dashboard"
+                icon="📊"
+                title="Dashboard"
+                subtitle="Resumo geral"
+                badge={unreadCount > 0 ? unreadCount > 99 ? "99+" : unreadCount : undefined}
+                emphasis="primary"
+              />
+              {!isTerceirizada && (
+                <SidebarItem
+                  menu="listaOS"
+                  icon="📋"
+                  title="Lista de OS"
+                  subtitle="Consulta e acompanhamento"
+                />
+              )}
+            </div>
+          </div>
+
+          {!isTerceirizada && (
+            <div className="sidebar-block">
+              <p className="sidebar-section-title">Abrir Ordem</p>
+              <div className="sidebar-nav">
+                <SidebarItem
+                  menu="buraco"
+                  icon="🧱"
+                  title="Calçamento"
+                  subtitle="Blocos"
+                />
+                <SidebarItem
+                  menu="asfalto"
+                  icon="🛣️"
+                  title="Asfalto"
+                  subtitle="Reparo e tapa-buraco"
+                />
+                <SidebarItem
+                  menu="hidrojato"
+                  icon="🚛"
+                  title="Caminhão Hidrojato"
+                  subtitle="Serviço interno SANEAR"
+                />
+                <SidebarItem
+                  menu="esgoto_entupido"
+                  icon="🚧"
+                  title="Esgoto Entupido"
+                  subtitle="Rede obstruída"
+                />
+                <SidebarItem
+                  menu="esgoto_retornando"
+                  icon="💧"
+                  title="Esgoto Retornando"
+                  subtitle="Retorno no imóvel"
+                />
+              </div>
+            </div>
+          )}
+
+          {!isTerceirizada && (
+            <div className="sidebar-block sidebar-block-sanear">
+              <p className="sidebar-section-title">Execução Interna</p>
+              <div className="sidebar-nav">
+                <SidebarItem
+                  menu="servico_sanear"
+                  icon="🛠️"
+                  title="Serviço SANEAR"
+                  subtitle="Serviços internos"
+                  emphasis="primary"
+                />
+              </div>
+            </div>
+          )}
+
+          <div className="sidebar-block sidebar-block-terceira">
+            <p className="sidebar-section-title">Execução Externa</p>
+            <div className="sidebar-nav">
+              <SidebarItem
+                menu="terceirizada"
+                icon="🤝"
+                title="Área da Terceirizada"
+                subtitle="Serviços enviados"
+              />
+            </div>
+          </div>
+
+          <div className="sidebar-block">
+            <p className="sidebar-section-title">Administração</p>
+            <div className="sidebar-nav">
+              <SidebarItem
+                menu="usuario"
+                icon="👤"
+                title="Usuário"
+                subtitle="Perfil e acesso"
+              />
+              {!isTerceirizada && (
+                <SidebarItem
+                  menu="backup"
+                  icon="🗄️"
+                  title="Backup"
+                  subtitle="Exportação segura"
+                  emphasis="warning"
+                />
+              )}
+            </div>
           </div>
         </div>
 
-        <div>
-          <p className="sidebar-section-title">Operacional</p>
-          <div className="sidebar-nav">
-            <button
-              type="button"
-              className={`sidebar-link ${activeMenu === "buraco" ? "active" : ""}`}
-              onClick={() => setActiveMenu("buraco")}
-            >
-              <span>Calçamento</span>
-            </button>
-
-            <button
-              type="button"
-              className={`sidebar-link ${activeMenu === "asfalto" ? "active" : ""}`}
-              onClick={() => setActiveMenu("asfalto")}
-            >
-              <span>Asfalto</span>
-            </button>
-
-            <button
-              type="button"
-              className={`sidebar-link ${activeMenu === "hidrojato" ? "active" : ""}`}
-              onClick={() => setActiveMenu("hidrojato")}
-            >
-              <span>Caminhão Hidrojato</span>
-            </button>
-
-            <button
-              type="button"
-              className={`sidebar-link ${activeMenu === "esgoto_entupido" ? "active" : ""}`}
-              onClick={() => setActiveMenu("esgoto_entupido")}
-            >
-              <span>Esgoto Entupido</span>
-            </button>
-
-            <button
-              type="button"
-              className={`sidebar-link ${activeMenu === "esgoto_retornando" ? "active" : ""}`}
-              onClick={() => setActiveMenu("esgoto_retornando")}
-            >
-              <span>Esgoto Retornando</span>
-            </button>
-
-            <button
-              type="button"
-              className={`sidebar-link ${activeMenu === "listaOS" ? "active" : ""}`}
-              onClick={() => setActiveMenu("listaOS")}
-            >
-              <span>Lista de Ordens de Serviço</span>
-            </button>
-          </div>
-        </div>
-
-        <div>
-          <p className="sidebar-section-title">Terceirizada</p>
-          <div className="sidebar-nav">
-            <button
-              type="button"
-              className={`sidebar-link ${activeMenu === "terceirizada" ? "active" : ""}`}
-              onClick={() => setActiveMenu("terceirizada")}
-            >
-              <span>Visão da Terceirizada</span>
-              <small>Execução</small>
-            </button>
-          </div>
-        </div>
-
-        <div>
-          <p className="sidebar-section-title">Configurações</p>
-          <div className="sidebar-nav">
-            <button
-              type="button"
-              className={`sidebar-link ${activeMenu === "usuario" ? "active" : ""}`}
-              onClick={() => setActiveMenu("usuario")}
-            >
-              <span>Usuário</span>
-              <small>Perfil &amp; Acesso</small>
-            </button>
-
-            {simulatedRole === "adm" && (
-              <button
-                type="button"
-                className={`sidebar-link ${activeMenu === "backup" ? "active" : ""}`}
-                onClick={() => setActiveMenu("backup")}
-              >
-                <span>Backup</span>
-                <small>Histórico &amp; Limpeza</small>
-              </button>
-            )}
-          </div>
+        <div className="sidebar-footer-card">
+          <span className="sidebar-footer-eyebrow">Operação</span>
+          <strong>Controle de OS ativo</strong>
+          <small>Registre, acompanhe e finalize os serviços pelo painel.</small>
         </div>
       </aside>
 

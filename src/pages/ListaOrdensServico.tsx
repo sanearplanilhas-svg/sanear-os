@@ -26,7 +26,7 @@ import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 
 const STORAGE_BUCKET = "os-arquivos";
 
-type OrigemOS = "buraco" | "asfalto";
+type OrigemOS = "buraco" | "asfalto" | "hidrojato";
 
 type FirestoreOS = {
   id: string;
@@ -45,6 +45,10 @@ type FirestoreOS = {
   createdAt?: Timestamp | null;
   createdByEmail?: string | null;
   dataExecucao?: Timestamp | null;
+  tipoCaminhaoExecucao?: string | null;
+  tipoCaminhaoExecucaoLabel?: string | null;
+  finalizadoPorArea?: string | null;
+  finalizadoPorEmail?: string | null;
 
   // SLA (72h) e pausa SANEAR
   slaHoras?: number | null;
@@ -55,6 +59,8 @@ type FirestoreOS = {
   ordemServicoPdfBase64?: string | null;
   ordemServicoPdfNomeArquivo?: string | null;
   ordemServicoPdfDataAnexo?: string | null;
+  ordemServicoPdfUrl?: string | null;
+  ordemServicoPdfPath?: string | null;
 
   // fotos
   fotos?: any[] | null; // operador (abertura)
@@ -64,6 +70,13 @@ type FirestoreOS = {
 type StatusType = "success" | "error" | "info";
 
 type StatusFiltroOs = "TODAS" | "ABERTAS" | "FECHADAS";
+type TipoFiltroOs =
+  | "TODOS"
+  | "BURACO_RUA"
+  | "ASFALTO"
+  | "HIDROJATO"
+  | "ESGOTO_RETORNANDO"
+  | "ESGOTO_ENTUPIDO";
 type OrdenacaoCampoOs = "createdAt" | "dataExecucao";
 type OrdenacaoDirecaoOs = "asc" | "desc";
 
@@ -91,8 +104,73 @@ type PrintPhotoState = {
 // FRONTEND APENAS: labels amigáveis
 const tipoLabelMap: Record<string, string> = {
   BURACO_RUA: "Calçamento",
+  CALCAMENTO: "Calçamento",
   ASFALTO: "Asfalto",
+  HIDROJATO: "Caminhão Hidrojato",
+  CAMINHAO_HIDROJATO: "Caminhão Hidrojato",
+  ESGOTO_RETORNANDO: "Esgoto Retornando",
+  ESGOTO_ENTUPIDO: "Esgoto Entupido",
 };
+
+const tipoFiltroOptions: { value: TipoFiltroOs; label: string }[] = [
+  { value: "TODOS", label: "Todos os tipos" },
+  { value: "BURACO_RUA", label: "Calçamento" },
+  { value: "ASFALTO", label: "Asfalto" },
+  { value: "HIDROJATO", label: "Caminhão Hidrojato" },
+  { value: "ESGOTO_RETORNANDO", label: "Esgoto Retornando" },
+  { value: "ESGOTO_ENTUPIDO", label: "Esgoto Entupido" },
+];
+
+const origemLabelMap: Record<OrigemOS, string> = {
+  buraco: "Calçamento",
+  asfalto: "Asfalto",
+  hidrojato: "Caminhão Hidrojato",
+};
+
+function getOrigemLabel(origem: OrigemOS): string {
+  return origemLabelMap[origem] || "Ordem de Serviço";
+}
+
+function normalizeTipoOs(os: Pick<FirestoreOS, "tipo" | "origem">): TipoFiltroOs {
+  const rawTipo = String(os.tipo ?? "").trim().toUpperCase();
+
+  if (rawTipo === "BURACO_RUA" || rawTipo === "CALCAMENTO") return "BURACO_RUA";
+  if (rawTipo === "ASFALTO") return "ASFALTO";
+  if (rawTipo === "HIDROJATO" || rawTipo === "CAMINHAO_HIDROJATO") return "HIDROJATO";
+  if (rawTipo === "ESGOTO_RETORNANDO") return "ESGOTO_RETORNANDO";
+  if (rawTipo === "ESGOTO_ENTUPIDO") return "ESGOTO_ENTUPIDO";
+
+  if (os.origem === "buraco") return "BURACO_RUA";
+  if (os.origem === "asfalto") return "ASFALTO";
+  if (os.origem === "hidrojato") return "HIDROJATO";
+
+  return "BURACO_RUA";
+}
+
+function getTipoOsLabel(os: Pick<FirestoreOS, "tipo" | "origem">): string {
+  const tipoNormalizado = normalizeTipoOs(os);
+  return tipoLabelMap[tipoNormalizado] || tipoLabelMap[os.tipo || ""] || getOrigemLabel(os.origem);
+}
+
+function getCaminhaoExecucaoLabel(os: FirestoreOS): string {
+  if (os.tipoCaminhaoExecucaoLabel) return os.tipoCaminhaoExecucaoLabel;
+  const tipo = String(os.tipoCaminhaoExecucao ?? "").toUpperCase();
+  if (tipo === "PROPRIO") return "Caminhão próprio";
+  if (tipo === "TERCEIRIZADO") return "Caminhão terceirizado";
+  return "-";
+}
+
+function getCollectionName(origem: OrigemOS): "ordens_servico" | "ordensServico" | "ordensHidrojato" {
+  if (origem === "asfalto") return "ordensServico";
+  if (origem === "hidrojato") return "ordensHidrojato";
+  return "ordens_servico";
+}
+
+function getStorageBasePath(origem: OrigemOS): string {
+  if (origem === "asfalto") return "asfalto";
+  if (origem === "hidrojato") return "hidrojato";
+  return "buraco-rua";
+}
 
 function formatDateTime(value?: Timestamp | null): string {
   try {
@@ -210,6 +288,87 @@ function sanitizeForStoragePath(name: string): string {
     .replace(/[^a-zA-Z0-9.\-_]/g, "_");
 }
 
+function getPdfNested(raw: any): Record<string, any> | null {
+  return raw && typeof raw.ordemServicoPdf === "object" && raw.ordemServicoPdf !== null
+    ? raw.ordemServicoPdf
+    : null;
+}
+
+function resolveRawPdfUrl(raw: any, pdfNested: Record<string, any> | null): string | null {
+  return (
+    raw.ordemServicoPdfUrl ??
+    raw.osPdfUrl ??
+    raw.pdfUrl ??
+    (typeof raw.ordemServicoPdf === "string" ? raw.ordemServicoPdf : null) ??
+    pdfNested?.url ??
+    pdfNested?.publicUrl ??
+    pdfNested?.downloadURL ??
+    null
+  );
+}
+
+function resolveRawPdfPath(raw: any, pdfNested: Record<string, any> | null): string | null {
+  return raw.ordemServicoPdfPath ?? raw.osPdfPath ?? pdfNested?.path ?? null;
+}
+
+function resolveRawPdfBase64(raw: any, pdfNested: Record<string, any> | null): string | null {
+  return raw.ordemServicoPdfBase64 ?? raw.osPdfBase64 ?? pdfNested?.base64 ?? null;
+}
+
+function resolveRawPdfNomeArquivo(raw: any, pdfNested: Record<string, any> | null): string | null {
+  return (
+    raw.ordemServicoPdfNomeArquivo ??
+    raw.osPdfNomeArquivo ??
+    pdfNested?.nomeArquivo ??
+    pdfNested?.name ??
+    null
+  );
+}
+
+function resolveRawPdfDataAnexo(raw: any, pdfNested: Record<string, any> | null): string | null {
+  return raw.ordemServicoPdfDataAnexo ?? raw.osPdfDataAnexo ?? pdfNested?.dataAnexoTexto ?? null;
+}
+
+function base64PdfToObjectUrl(base64OrDataUrl: string): string {
+  const base64 = base64OrDataUrl.includes(",")
+    ? base64OrDataUrl.split(",").pop() || ""
+    : base64OrDataUrl;
+
+  const binary = window.atob(base64);
+  const bytes = new Uint8Array(binary.length);
+
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+
+  const blob = new Blob([bytes], { type: "application/pdf" });
+  return URL.createObjectURL(blob);
+}
+
+function hasAttachedPdf(os: FirestoreOS): boolean {
+  return Boolean(os.ordemServicoPdfUrl || os.ordemServicoPdfPath || os.ordemServicoPdfBase64);
+}
+
+function resolveAttachedPdfUrl(os: FirestoreOS): { url: string; shouldRevoke: boolean } | null {
+  if (os.ordemServicoPdfUrl) {
+    return { url: os.ordemServicoPdfUrl, shouldRevoke: false };
+  }
+
+  if (os.ordemServicoPdfPath) {
+    const { data } = supabase.storage
+      .from(STORAGE_BUCKET)
+      .getPublicUrl(os.ordemServicoPdfPath);
+
+    if (data.publicUrl) return { url: data.publicUrl, shouldRevoke: false };
+  }
+
+  if (os.ordemServicoPdfBase64) {
+    return { url: base64PdfToObjectUrl(os.ordemServicoPdfBase64), shouldRevoke: true };
+  }
+
+  return null;
+}
+
 /**
  * PASSO 3: limpa arquivos do Supabase Storage ao excluir OS
  * Remove recursivamente tudo dentro do prefix (pasta).
@@ -306,8 +465,10 @@ function resolveFotosExecucao(raw: any): any[] | null {
 const ListaOrdensServico: React.FC = () => {
   const [ordensBuraco, setOrdensBuraco] = useState<FirestoreOS[]>([]);
   const [ordensAsfalto, setOrdensAsfalto] = useState<FirestoreOS[]>([]);
+  const [ordensHidrojato, setOrdensHidrojato] = useState<FirestoreOS[]>([]);
 
   const [busca, setBusca] = useState("");
+  const [filtroTipo, setFiltroTipo] = useState<TipoFiltroOs>("TODOS");
 
   // Destaque automático vindo do alerta de SLA (48h úteis)
   const [highlightRowKey, setHighlightRowKey] = useState<string | null>(null);
@@ -386,7 +547,7 @@ const ListaOrdensServico: React.FC = () => {
       (snap) => {
         const data: FirestoreOS[] = snap.docs.map((d) => {
           const raw = d.data() as any;
-          const pdfNested = raw.ordemServicoPdf ?? null;
+          const pdfNested = getPdfNested(raw);
           return {
             id: d.id,
             origem: "buraco",
@@ -403,14 +564,17 @@ const ListaOrdensServico: React.FC = () => {
             createdAt: raw.createdAt ?? null,
             createdByEmail: raw.createdByEmail ?? null,
             dataExecucao: raw.dataExecucao ?? null,
+            tipoCaminhaoExecucao: raw.tipoCaminhaoExecucao ?? null,
+            tipoCaminhaoExecucaoLabel: raw.tipoCaminhaoExecucaoLabel ?? null,
+            finalizadoPorArea: raw.finalizadoPorArea ?? null,
+            finalizadoPorEmail: raw.finalizadoPorEmail ?? null,
             fotos: resolveFotosAbertura(raw),
             fotosExecucao: resolveFotosExecucao(raw),
-            ordemServicoPdfBase64:
-              raw.ordemServicoPdfBase64 ?? pdfNested?.base64 ?? null,
-            ordemServicoPdfNomeArquivo:
-              raw.ordemServicoPdfNomeArquivo ?? pdfNested?.nomeArquivo ?? null,
-            ordemServicoPdfDataAnexo:
-              raw.ordemServicoPdfDataAnexo ?? pdfNested?.dataAnexoTexto ?? null,
+            ordemServicoPdfBase64: resolveRawPdfBase64(raw, pdfNested),
+            ordemServicoPdfNomeArquivo: resolveRawPdfNomeArquivo(raw, pdfNested),
+            ordemServicoPdfDataAnexo: resolveRawPdfDataAnexo(raw, pdfNested),
+            ordemServicoPdfUrl: resolveRawPdfUrl(raw, pdfNested),
+            ordemServicoPdfPath: resolveRawPdfPath(raw, pdfNested),
           };
         });
         setOrdensBuraco(data);
@@ -437,7 +601,7 @@ const ListaOrdensServico: React.FC = () => {
       (snap) => {
         const data: FirestoreOS[] = snap.docs.map((d) => {
           const raw = d.data() as any;
-          const pdfNested = raw.ordemServicoPdf ?? null;
+          const pdfNested = getPdfNested(raw);
           return {
             id: d.id,
             origem: "asfalto",
@@ -453,14 +617,17 @@ const ListaOrdensServico: React.FC = () => {
             createdAt: raw.createdAt ?? null,
             createdByEmail: raw.createdByEmail ?? null,
             dataExecucao: raw.dataExecucao ?? null,
+            tipoCaminhaoExecucao: raw.tipoCaminhaoExecucao ?? null,
+            tipoCaminhaoExecucaoLabel: raw.tipoCaminhaoExecucaoLabel ?? null,
+            finalizadoPorArea: raw.finalizadoPorArea ?? null,
+            finalizadoPorEmail: raw.finalizadoPorEmail ?? null,
             fotos: resolveFotosAbertura(raw),
             fotosExecucao: resolveFotosExecucao(raw),
-            ordemServicoPdfBase64:
-              raw.ordemServicoPdfBase64 ?? pdfNested?.base64 ?? null,
-            ordemServicoPdfNomeArquivo:
-              raw.ordemServicoPdfNomeArquivo ?? pdfNested?.nomeArquivo ?? null,
-            ordemServicoPdfDataAnexo:
-              raw.ordemServicoPdfDataAnexo ?? pdfNested?.dataAnexoTexto ?? null,
+            ordemServicoPdfBase64: resolveRawPdfBase64(raw, pdfNested),
+            ordemServicoPdfNomeArquivo: resolveRawPdfNomeArquivo(raw, pdfNested),
+            ordemServicoPdfDataAnexo: resolveRawPdfDataAnexo(raw, pdfNested),
+            ordemServicoPdfUrl: resolveRawPdfUrl(raw, pdfNested),
+            ordemServicoPdfPath: resolveRawPdfPath(raw, pdfNested),
           };
         });
         setOrdensAsfalto(data);
@@ -476,9 +643,63 @@ const ListaOrdensServico: React.FC = () => {
       }
     );
 
+    // Caminhão Hidrojato (ordensHidrojato)
+    const qHidrojato = query(
+      collection(db, "ordensHidrojato"),
+      orderBy("createdAt", "desc")
+    );
+
+    const unsubHidrojato = onSnapshot(
+      qHidrojato,
+      (snap) => {
+        const data: FirestoreOS[] = snap.docs.map((d) => {
+          const raw = d.data() as any;
+          const pdfNested = getPdfNested(raw);
+          return {
+            id: d.id,
+            origem: "hidrojato",
+            tipo: raw.tipo || "HIDROJATO",
+            protocolo: raw.protocolo ?? null,
+            ordemServico: raw.ordemServico ?? null,
+            bairro: raw.bairro ?? null,
+            rua: raw.rua ?? null,
+            numero: raw.numero ?? null,
+            pontoReferencia: raw.pontoReferencia ?? raw.referencia ?? null,
+            observacoes: raw.observacoes ?? null,
+            status: raw.status ?? null,
+            createdAt: raw.createdAt ?? null,
+            createdByEmail: raw.createdByEmail ?? null,
+            dataExecucao: raw.dataExecucao ?? null,
+            tipoCaminhaoExecucao: raw.tipoCaminhaoExecucao ?? null,
+            tipoCaminhaoExecucaoLabel: raw.tipoCaminhaoExecucaoLabel ?? null,
+            finalizadoPorArea: raw.finalizadoPorArea ?? null,
+            finalizadoPorEmail: raw.finalizadoPorEmail ?? null,
+            fotos: resolveFotosAbertura(raw),
+            fotosExecucao: resolveFotosExecucao(raw),
+            ordemServicoPdfBase64: resolveRawPdfBase64(raw, pdfNested),
+            ordemServicoPdfNomeArquivo: resolveRawPdfNomeArquivo(raw, pdfNested),
+            ordemServicoPdfDataAnexo: resolveRawPdfDataAnexo(raw, pdfNested),
+            ordemServicoPdfUrl: resolveRawPdfUrl(raw, pdfNested),
+            ordemServicoPdfPath: resolveRawPdfPath(raw, pdfNested),
+          };
+        });
+        setOrdensHidrojato(data);
+        setLoading(false);
+      },
+      (err) => {
+        console.error(err);
+        setLoading(false);
+        setStatusMessage(
+          "Não foi possível carregar as ordens de Caminhão Hidrojato. Verifique sua conexão e tente novamente."
+        );
+        setStatusType("error");
+      }
+    );
+
     return () => {
       unsubBuraco();
       unsubAsfalto();
+      unsubHidrojato();
     };
   }, []);
 
@@ -494,7 +715,7 @@ const ListaOrdensServico: React.FC = () => {
       const id = parsed?.id;
       if (!id) return;
 
-      const all = [...ordensBuraco, ...ordensAsfalto];
+      const all = [...ordensBuraco, ...ordensAsfalto, ...ordensHidrojato];
       const found = all.find((o) => o.id === id);
 
       if (found) {
@@ -505,11 +726,11 @@ const ListaOrdensServico: React.FC = () => {
     } catch {
       window.sessionStorage.removeItem("sanear-open-os");
     }
-  }, [loading, ordensBuraco, ordensAsfalto]);
+  }, [loading, ordensBuraco, ordensAsfalto, ordensHidrojato]);
 
   const ordens = useMemo(() => {
-    return [...ordensBuraco, ...ordensAsfalto];
-  }, [ordensBuraco, ordensAsfalto]);
+    return [...ordensBuraco, ...ordensAsfalto, ...ordensHidrojato];
+  }, [ordensBuraco, ordensAsfalto, ordensHidrojato]);
 
   const ordensByKey = useMemo(() => {
     const m = new Map<string, FirestoreOS>();
@@ -604,6 +825,10 @@ const ListaOrdensServico: React.FC = () => {
   const filtradas = useMemo(() => {
     let lista = [...filtradasBusca];
 
+    if (filtroTipo !== "TODOS") {
+      lista = lista.filter((os) => normalizeTipoOs(os) === filtroTipo);
+    }
+
     if (filtroDataCriacao) {
       lista = lista.filter((os) =>
         isSameLocalDate(os.createdAt, filtroDataCriacao)
@@ -663,6 +888,7 @@ const ListaOrdensServico: React.FC = () => {
     return lista;
   }, [
     filtradasBusca,
+    filtroTipo,
     filtroDataCriacao,
     filtroStatus,
     ordenacaoCampo,
@@ -710,6 +936,7 @@ const ListaOrdensServico: React.FC = () => {
       setHighlightRowKey(key);
 
       // Garante visibilidade da OS
+      setFiltroTipo("TODOS");
       setFiltroStatus("TODAS");
       setFiltroDataCriacao("");
 
@@ -764,16 +991,13 @@ const ListaOrdensServico: React.FC = () => {
 
     y -= lineHeight * 2;
 
-    const tipoLabel =
-      tipoLabelMap[os.tipo || ""] ||
-      os.tipo ||
-      (os.origem === "asfalto" ? "Asfalto" : "Calçamento");
+    const tipoLabel = getTipoOsLabel(os);
 
     const rows: { label: string; value: string }[] = [
       { label: "Tipo", value: tipoLabel },
       {
         label: "Origem",
-        value: os.origem === "asfalto" ? "Asfalto" : "Calçamento",
+        value: getOrigemLabel(os.origem),
       },
       { label: "Nº OS", value: os.ordemServico || "-" },
       { label: "Protocolo", value: os.protocolo || "-" },
@@ -784,6 +1008,9 @@ const ListaOrdensServico: React.FC = () => {
       { label: "Status", value: os.status || "ABERTA" },
       { label: "Data de criação", value: formatDateTime(os.createdAt) },
       { label: "Data de execução", value: formatDateTime(os.dataExecucao) },
+      ...(os.origem === "hidrojato"
+        ? [{ label: "Execução Hidrojato", value: getCaminhaoExecucaoLabel(os) }]
+        : []),
       { label: "Criado por", value: os.createdByEmail || "-" },
       {
         label: "Observações",
@@ -863,12 +1090,23 @@ const ListaOrdensServico: React.FC = () => {
     setPdfModalLoading(true);
 
     try {
+      const attachedPdf = resolveAttachedPdfUrl(os);
+
+      if (attachedPdf) {
+        setPdfModalUrl(attachedPdf.url);
+        return;
+      }
+
       const url = await generateOsDataPdfUrl(os);
       setPdfModalUrl(url);
+      setStatusMessage(
+        "Esta OS não possui PDF original anexado. Foi aberto o PDF gerado com os dados do cadastro."
+      );
+      setStatusType("info");
     } catch (err) {
       console.error(err);
       setStatusMessage(
-        "Não foi possível gerar o PDF com os dados da OS. Tente novamente."
+        "Não foi possível abrir o PDF da OS. Tente novamente."
       );
       setStatusType("error");
       setPdfModalOs(null);
@@ -882,6 +1120,24 @@ const ListaOrdensServico: React.FC = () => {
     setPdfModalUrl(null);
     setPdfModalOs(null);
     setPdfModalLoading(false);
+  }
+
+  function handleOpenAttachedPdfFromDetails(os: FirestoreOS) {
+    const attachedPdf = resolveAttachedPdfUrl(os);
+
+    if (!attachedPdf) {
+      openAlertModal(
+        "PDF não encontrado",
+        "Esta OS não possui PDF anexado na criação."
+      );
+      return;
+    }
+
+    window.open(attachedPdf.url, "_blank", "noopener,noreferrer");
+
+    if (attachedPdf.shouldRevoke) {
+      window.setTimeout(() => URL.revokeObjectURL(attachedPdf.url), 60000);
+    }
   }
 
   function handlePrintCurrentPdf() {
@@ -903,7 +1159,7 @@ async function handleMarcarAguardandoSanear() {
     setSavingDetails(true);
 
     const collectionName =
-      detailsModalOs.origem === "asfalto" ? "ordensServico" : "ordens_servico";
+      getCollectionName(detailsModalOs.origem);
 
     const statusAtual = normalizeStatus(detailsModalOs.status);
     const statusAntes =
@@ -954,7 +1210,7 @@ async function handleRetomarSanear() {
     setSavingDetails(true);
 
     const collectionName =
-      detailsModalOs.origem === "asfalto" ? "ordensServico" : "ordens_servico";
+      getCollectionName(detailsModalOs.origem);
 
     const pausasFechadas = closeSanearPause(detailsModalOs.slaPausas, serverTimestamp());
     const novoStatus = detailsModalOs.statusAntesAguardandoSanear || "ABERTA";
@@ -991,10 +1247,10 @@ async function handleDeleteOs(os: FirestoreOS) {
 
     try {
       const collectionName =
-        os.origem === "asfalto" ? "ordensServico" : "ordens_servico";
+        getCollectionName(os.origem);
 
       // Cleanup no Storage ANTES de deletar o doc
-      const basePath = os.origem === "asfalto" ? "asfalto" : "buraco-rua";
+      const basePath = getStorageBasePath(os.origem);
       const prefix = `${basePath}/${os.id}`;
 
       let storageOk = true;
@@ -1066,9 +1322,7 @@ async function handleSaveDetails() {
       setSavingDetails(true);
 
       const collectionName =
-        detailsModalOs.origem === "asfalto"
-          ? "ordensServico"
-          : "ordens_servico";
+        getCollectionName(detailsModalOs.origem);
 
       await updateDoc(doc(db, collectionName, detailsModalOs.id), {
         ordemServico: detailsModalOs.ordemServico || null,
@@ -1203,7 +1457,7 @@ async function handleSaveDetails() {
 
     try {
       const collectionName =
-        os.origem === "asfalto" ? "ordensServico" : "ordens_servico";
+        getCollectionName(os.origem);
 
       const originalArray: any[] =
         (tipo === "abertura" ? os.fotos : os.fotosExecucao) || [];
@@ -1288,7 +1542,7 @@ async function handleSaveDetails() {
     }
 
     try {
-      const basePath = os.origem === "asfalto" ? "asfalto" : "buraco-rua";
+      const basePath = getStorageBasePath(os.origem);
       const subfolder = tipo === "abertura" ? "fotos" : "fotos-execucao";
 
       const agora = new Date();
@@ -1327,7 +1581,7 @@ async function handleSaveDetails() {
       }
 
       const collectionName =
-        os.origem === "asfalto" ? "ordensServico" : "ordens_servico";
+        getCollectionName(os.origem);
 
       const originalArray: any[] =
         (tipo === "abertura" ? os.fotos : os.fotosExecucao) || [];
@@ -1608,6 +1862,20 @@ async function handleSaveDetails() {
             alignItems: "flex-end",
           }}
         >
+          <div className="page-field" style={{ minWidth: 230 }}>
+            <label>Tipo de serviço</label>
+            <select
+              value={filtroTipo}
+              onChange={(e) => setFiltroTipo(e.target.value as TipoFiltroOs)}
+            >
+              {tipoFiltroOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
           <div className="page-field" style={{ minWidth: 190 }}>
             <label>Data de criação</label>
             <input
@@ -1681,6 +1949,7 @@ async function handleSaveDetails() {
               <thead style={{ position: "sticky", top: 0, zIndex: 9, background: "#fff" }}>
                 <tr>
                   <th style={stickyHeaderCellStyle}>Nº OS</th>
+                  <th style={stickyHeaderCellStyle}>Tipo</th>
                   <th style={stickyHeaderCellStyle}>Bairro</th>
                   <th style={stickyHeaderCellStyle}>Rua / Avenida</th>
                   <th style={stickyHeaderCellStyle}>Dados da OS</th>
@@ -1710,6 +1979,7 @@ async function handleSaveDetails() {
                       style={{ cursor: "pointer" }}
                     >
                       <td>{os.ordemServico || os.protocolo || "-"}</td>
+                      <td>{getTipoOsLabel(os)}</td>
                       <td>{os.bairro || "-"}</td>
                       <td>{os.rua || "-"}</td>
                       <td>
@@ -1719,12 +1989,17 @@ async function handleSaveDetails() {
                             className="btn-secondary"
                             onClick={(event) => handleOpenPdfModal(os, event)}
                           >
-                            Ver dados
+                            Abrir PDF
                           </button>
                         </div>
                       </td>
                       <td>{formatDateTime(os.createdAt)}</td>
-                      <td>{formatDateTime(os.dataExecucao)}</td>
+                      <td>
+                        <div>{formatDateTime(os.dataExecucao)}</div>
+                        {os.origem === "hidrojato" && (
+                          <small>{getCaminhaoExecucaoLabel(os)}</small>
+                        )}
+                      </td>
                       <td>
                         <div className="os-row-actions" style={{ gap: "0.5rem" }}>
                           <button
@@ -1811,7 +2086,7 @@ async function handleSaveDetails() {
 
             <div style={{ flex: 1 }}>
               {pdfModalLoading && (
-                <div className="os-empty">Gerando PDF com dados da OS...</div>
+                <div className="os-empty">Abrindo PDF da OS...</div>
               )}
               {!pdfModalLoading && pdfModalUrl && (
                 <iframe
@@ -1858,9 +2133,7 @@ async function handleSaveDetails() {
                       className="field-readonly"
                       readOnly
                       value={
-                        tipoLabelMap[detailsModalOs.tipo || ""] ||
-                        detailsModalOs.tipo ||
-                        (detailsModalOs.origem === "asfalto" ? "Asfalto" : "Calçamento")
+                        getTipoOsLabel(detailsModalOs)
                       }
                     />
                   </div>
@@ -1937,6 +2210,17 @@ async function handleSaveDetails() {
                       <input className="field-readonly" readOnly value={formatDateTime(detailsModalOs.dataExecucao)} />
                     )}
                   </div>
+
+                  {detailsModalOs.origem === "hidrojato" && (
+                    <div className="page-field">
+                      <label>Execução Hidrojato</label>
+                      <input
+                        className="field-readonly"
+                        readOnly
+                        value={getCaminhaoExecucaoLabel(detailsModalOs)}
+                      />
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -2014,6 +2298,30 @@ async function handleSaveDetails() {
                       )
                     }
                   />
+                </div>
+              </div>
+
+
+              <div className="page-section">
+                <h3>PDF da OS anexado</h3>
+                <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", flexWrap: "wrap" }}>
+                  {hasAttachedPdf(detailsModalOs) ? (
+                    <>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        onClick={() => handleOpenAttachedPdfFromDetails(detailsModalOs)}
+                      >
+                        Abrir PDF anexado na criação
+                      </button>
+                      <span className="field-hint">
+                        {detailsModalOs.ordemServicoPdfNomeArquivo || "PDF anexado"}
+                        {detailsModalOs.ordemServicoPdfDataAnexo ? ` — ${detailsModalOs.ordemServicoPdfDataAnexo}` : ""}
+                      </span>
+                    </>
+                  ) : (
+                    <span className="field-hint">Nenhum PDF anexado na criação desta OS.</span>
+                  )}
                 </div>
               </div>
 

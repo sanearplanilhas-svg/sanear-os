@@ -763,6 +763,7 @@ const Backup: React.FC = () => {
   };
 
   const [authorized, setAuthorized] = useState<boolean | null>(null);
+  const [canDeleteFromCloud, setCanDeleteFromCloud] = useState(false);
   const [startDate, setStartDate] = useState(toInput(firstDay));
   const [endDate, setEndDate] = useState(toInput(today));
   const [typeFilter, setTypeFilter] = useState<TipoFiltro>("TODOS");
@@ -796,8 +797,18 @@ const Backup: React.FC = () => {
           return;
         }
         const profile = await getDoc(doc(db, "usuarios_sistema", user.uid));
-        const role = String(profile.data()?.role ?? "").toLowerCase();
-        if (active) setAuthorized(role === "adm");
+        const role = String(
+          profile.data()?.role ?? profile.data()?.nivel ?? ""
+        )
+          .trim()
+          .toLowerCase();
+
+        const allowedRoles = ["adm", "admin", "diretor", "diretoria", "operador"];
+
+        if (active) {
+          setAuthorized(allowedRoles.includes(role));
+          setCanDeleteFromCloud(role === "adm" || role === "admin");
+        }
       } catch (error) {
         console.error(error);
         if (active) setAuthorized(false);
@@ -1261,7 +1272,7 @@ const Backup: React.FC = () => {
         <div className="backup-denied">
           <div className="backup-denied-icon">🔒</div>
           <h2>Acesso restrito</h2>
-          <p>Somente usuários com perfil ADM podem gerar e excluir backups.</p>
+          <p>A Terceirizada não possui acesso ao histórico de backup.</p>
         </div>
       </section>
     );
@@ -1564,14 +1575,21 @@ const Backup: React.FC = () => {
               <span>Hash: {backupResult.manifest.contentHash.slice(0, 16)}…</span>
             </div>
           </div>
-          <button
-            type="button"
-            className="backup-delete-button"
-            onClick={() => setShowDeleteModal(true)}
-            disabled={deleting}
-          >
-            Apagar itens incluídos da nuvem
-          </button>
+          {canDeleteFromCloud ? (
+            <button
+              type="button"
+              className="backup-delete-button"
+              onClick={() => setShowDeleteModal(true)}
+              disabled={deleting}
+            >
+              Apagar itens incluídos da nuvem
+            </button>
+          ) : (
+            <div className="backup-delete-restricted">
+              <strong>Somente o ADM pode limpar a nuvem</strong>
+              <small>Você pode gerar e salvar o ZIP normalmente.</small>
+            </div>
+          )}
         </section>
       )}
 
@@ -1716,7 +1734,7 @@ const Backup: React.FC = () => {
         </div>
       )}
 
-      {showDeleteModal && backupResult && (
+      {showDeleteModal && backupResult && canDeleteFromCloud && (
         <div className="modal-backdrop backup-modal-backdrop">
           <div className="modal backup-delete-modal" role="dialog" aria-modal="true">
             <div className="modal-header">

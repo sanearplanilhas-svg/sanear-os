@@ -95,6 +95,19 @@ service cloud.firestore {
       allow delete: if ehAdm();
     }
 
+    match /ordensHidrojato/{ordemId} {
+      // Hidrojato é serviço interno da SANEAR.
+      // A terceirizada não lê, não lista e não finaliza estas OS.
+      allow read: if ehAdm() || ehDiretor() || ehOperador();
+
+      allow create: if podeCadastrarOrdem() &&
+        criadorInformadoCorretamente();
+
+      allow update: if ehAdm() || ehDiretor() || ehOperador();
+
+      allow delete: if ehAdm();
+    }
+
     match /{documento=**} {
       allow read, write: if false;
     }

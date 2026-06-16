@@ -57,6 +57,8 @@ type FirestoreOS = {
   ordemServicoPdfBase64?: string | null;
   ordemServicoPdfNomeArquivo?: string | null;
   ordemServicoPdfDataAnexo?: string | null;
+  ordemServicoPdfUrl?: string | null;
+  ordemServicoPdfPath?: string | null;
 
   // Fotos da execução (terceirizada) – usadas na ListaOrdensServico
   fotosExecucao?: any[] | null;
@@ -74,9 +76,29 @@ const tipoLabelMap: Record<string, string> = {
   ASFALTO: "Asfalto",
 };
 
+const origemLabelMap: Record<OrigemOS, string> = {
+  buraco: "Buraco na rua",
+  asfalto: "Asfalto",
+};
+
+function getOrigemLabel(origem: OrigemOS): string {
+  return origemLabelMap[origem] || "Ordem de Serviço";
+}
+
+function getCollectionName(origem: OrigemOS): "ordens_servico" | "ordensServico" {
+  if (origem === "asfalto") return "ordensServico";
+  return "ordens_servico";
+}
+
+function getStorageBasePath(origem: OrigemOS): string {
+  if (origem === "asfalto") return "asfalto";
+  return "buraco-rua";
+}
+
 const tipoBadgeClassMap: Record<string, string> = {
   BURACO_RUA: "os-badge os-badge-buraco",
   ASFALTO: "os-badge os-badge-asfalto",
+  HIDROJATO: "os-badge os-badge-asfalto",
 };
 
 function normalizeStatusValue(status?: string | null): string {
@@ -313,13 +335,13 @@ async function generateOsDataPdfUrl(os: FirestoreOS): Promise<string> {
   const tipoLabel =
     tipoLabelMap[os.tipo || ""] ||
     os.tipo ||
-    (os.origem === "asfalto" ? "Asfalto" : "Buraco na rua");
+    getOrigemLabel(os.origem);
 
   const rows: { label: string; value: string }[] = [
     { label: "Tipo", value: tipoLabel },
     {
       label: "Origem",
-      value: os.origem === "asfalto" ? "Asfalto" : "Buraco na rua",
+      value: getOrigemLabel(os.origem),
     },
     { label: "Nº OS", value: os.ordemServico || "-" },
     { label: "Protocolo", value: os.protocolo || "-" },
@@ -410,7 +432,6 @@ async function generateOsDataPdfUrl(os: FirestoreOS): Promise<string> {
 const TerceirizadaVisao: React.FC = () => {
   const [ordensBuraco, setOrdensBuraco] = useState<FirestoreOS[]>([]);
   const [ordensAsfalto, setOrdensAsfalto] = useState<FirestoreOS[]>([]);
-
   const [busca, setBusca] = useState("");
   const [loadingBuraco, setLoadingBuraco] = useState(true);
   const [loadingAsfalto, setLoadingAsfalto] = useState(true);
@@ -516,6 +537,10 @@ const TerceirizadaVisao: React.FC = () => {
               raw.ordemServicoPdfNomeArquivo ?? pdfNested?.nomeArquivo ?? null,
             ordemServicoPdfDataAnexo:
               raw.ordemServicoPdfDataAnexo ?? pdfNested?.dataAnexoTexto ?? null,
+            ordemServicoPdfUrl:
+              raw.ordemServicoPdfUrl ?? pdfNested?.url ?? null,
+            ordemServicoPdfPath:
+              raw.ordemServicoPdfPath ?? pdfNested?.path ?? null,
             fotosExecucao: raw.fotosExecucao ?? null,
           };
         });
@@ -589,6 +614,10 @@ const TerceirizadaVisao: React.FC = () => {
               raw.ordemServicoPdfNomeArquivo ?? pdfNested?.nomeArquivo ?? null,
             ordemServicoPdfDataAnexo:
               raw.ordemServicoPdfDataAnexo ?? pdfNested?.dataAnexoTexto ?? null,
+            ordemServicoPdfUrl:
+              raw.ordemServicoPdfUrl ?? pdfNested?.url ?? null,
+            ordemServicoPdfPath:
+              raw.ordemServicoPdfPath ?? pdfNested?.path ?? null,
             fotosExecucao: raw.fotosExecucao ?? null,
           };
         });
@@ -966,7 +995,7 @@ async function handleMarcarAguardandoSanear() {
     setIsUpdatingStatus(true);
 
     const collectionName =
-      modalOs.origem === "asfalto" ? "ordensServico" : "ordens_servico";
+      getCollectionName(modalOs.origem);
 
     const statusAtual = normalizeStatus(modalOs.status);
     const statusAntes =
@@ -1017,7 +1046,7 @@ async function handleRetomarSanear() {
     setIsUpdatingStatus(true);
 
     const collectionName =
-      modalOs.origem === "asfalto" ? "ordensServico" : "ordens_servico";
+      getCollectionName(modalOs.origem);
 
     const pausasFechadas = closeSanearPause(modalOs.slaPausas, Timestamp.now());
     const novoStatus = modalOs.statusAntesAguardandoSanear || "ABERTA";
@@ -1086,10 +1115,10 @@ async function handleServicoExecutado() {
       setIsUpdatingStatus(true);
 
       const collectionName =
-        modalOs.origem === "asfalto" ? "ordensServico" : "ordens_servico";
+        getCollectionName(modalOs.origem);
 
       const basePath =
-        modalOs.origem === "asfalto" ? "asfalto" : "buraco-rua";
+        getStorageBasePath(modalOs.origem);
       const subfolder = "fotos-execucao";
 
       const agora = new Date();
@@ -1247,7 +1276,8 @@ async function handleServicoExecutado() {
             É de suma importância que as Ordens de Serviço sejam marcadas como
             “Executada” na mesma data em que a execução for realizada. Pedimos
             especial atenção para que todos os registros permaneçam corretos e
-            alinhados com a data real da execução.
+            alinhados com a data real da execução. As ordens de Caminhão Hidrojato
+            ficam apenas na Área de Serviço SANEAR.
           </p>
         </div>
       </div>
