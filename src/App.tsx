@@ -9,6 +9,7 @@ import {
 
 import {
   collection,
+  doc,
   onSnapshot,
   orderBy,
   query,
@@ -106,6 +107,45 @@ function getNumeroOs(data: any, fallbackId: string) {
     fallbackId
   );
 }
+
+function resolveUserRole(value: unknown): SimulatedRole {
+  const role = normalizeText(String(value ?? ""));
+
+  if (role === "ADM" || role === "ADMIN" || role === "ADMINISTRADOR") {
+    return "adm";
+  }
+
+  if (role === "DIRETOR" || role === "DIRETORA") {
+    return "diretor";
+  }
+
+  if (role === "TERCEIRIZADA" || role === "TERCEIRO" || role === "TERCEIRADO") {
+    return "terceirizada";
+  }
+
+  return "operador";
+}
+
+function resolveProfileName(data: any, firebaseUser: User | null): string {
+  const dbName =
+    data?.nome ??
+    data?.name ??
+    data?.displayName ??
+    data?.usuario ??
+    "";
+
+  const cleanDbName = String(dbName ?? "").trim();
+  if (cleanDbName) return cleanDbName;
+
+  const authName = String(firebaseUser?.displayName ?? "").trim();
+  if (authName) return authName;
+
+  const authEmail = String(firebaseUser?.email ?? "").trim();
+  if (authEmail) return authEmail.split("@")[0];
+
+  return "Usuário";
+}
+
 function getMenuMeta(menu: MenuKey): { title: string; section: string } {
   switch (menu) {
     case "dashboard":
@@ -141,6 +181,8 @@ const App: React.FC = () => {
   // ---- AUTH ----
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileName, setProfileName] = useState("");
 
   // ---- LOGIN FORM ----
   const [email, setEmail] = useState("");
@@ -205,6 +247,7 @@ const App: React.FC = () => {
   const pageMeta = getMenuMeta(activeMenu);
 
   const userDisplayName =
+    profileName ||
     user?.displayName ||
     (user?.email ? user.email.split("@")[0] : "Usuário") ||
     "Usuário";
@@ -427,6 +470,7 @@ const App: React.FC = () => {
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
       setUser(firebaseUser);
+      setProfileLoading(Boolean(firebaseUser));
       setAuthLoading(false);
 
       if (firebaseUser?.email) {
@@ -436,6 +480,51 @@ const App: React.FC = () => {
 
     return () => unsubscribe();
   }, []);
+
+  // Perfil REAL do usuário: sempre vem do Firestore.
+  // Não usa mais localStorage como fonte de permissão, porque isso deixava o topo
+  // mostrando um perfil antigo até abrir a tela de Usuário ou forçar Ctrl+F5.
+  useEffect(() => {
+    if (!user) {
+      setProfileLoading(false);
+      setProfileName("");
+      setSimulatedRole("operador");
+      return;
+    }
+
+    setProfileLoading(true);
+
+    const userRef = doc(db, "usuarios_sistema", user.uid);
+
+    const unsubscribe = onSnapshot(
+      userRef,
+      (snap) => {
+        const data = snap.exists() ? (snap.data() as any) : null;
+
+        const resolvedRole = resolveUserRole(data?.role);
+        const resolvedName = resolveProfileName(data, user);
+
+        setSimulatedRole(resolvedRole);
+        setProfileName(resolvedName);
+
+        // Mantém compatibilidade com telas antigas, mas a fonte oficial agora é o banco.
+        localStorage.setItem("sanear-role", resolvedRole);
+        localStorage.setItem("sanear-user-name", resolvedName);
+
+        setProfileLoading(false);
+      },
+      (error) => {
+        console.error("Erro ao carregar perfil de acesso do Firestore:", error);
+
+        setSimulatedRole("operador");
+        setProfileName(resolveProfileName(null, user));
+        localStorage.setItem("sanear-role", "operador");
+        setProfileLoading(false);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [user]);
 
   // Sempre que trocar de página interna, grava na sessão do navegador.
   useEffect(() => {
@@ -467,29 +556,12 @@ const App: React.FC = () => {
     }
   }, []);
 
-  // Carregar papel salvo (Usuario.tsx grava sanear-role)
   useEffect(() => {
-    const storedRole = localStorage.getItem("sanear-role") as
-      | SimulatedRole
-      | null;
-
-    if (
-      storedRole === "diretor" ||
-      storedRole === "operador" ||
-      storedRole === "terceirizada" ||
-      storedRole === "adm"
-    ) {
-      setSimulatedRole(storedRole);
-    } else {
-      setSimulatedRole("operador");
-    }
-  }, []);
-
-  useEffect(() => {
+    if (profileLoading) return;
     if (simulatedRole === "terceirizada" && activeMenu !== "terceirizada") {
       setActiveMenu("terceirizada");
     }
-  }, [simulatedRole, activeMenu]);
+  }, [profileLoading, simulatedRole, activeMenu]);
 
   // Fecha popovers ao clicar fora
 useEffect(() => {
@@ -724,6 +796,7 @@ useEffect(() => {
 
     try {
       const cred = await signInWithEmailAndPassword(auth, email, password);
+      setProfileLoading(true);
       setUser(cred.user);
       setActiveMenu("dashboard");
 
@@ -755,6 +828,8 @@ useEffect(() => {
 
       if (typeof window !== "undefined") {
         window.sessionStorage.removeItem("sanear-active-menu");
+        window.localStorage.removeItem("sanear-role");
+        window.localStorage.removeItem("sanear-user-name");
       }
     } catch (error) {
       console.error(error);
@@ -762,6 +837,17 @@ useEffect(() => {
   }
 
   function renderContent() {
+    if (profileLoading) {
+      return (
+        <section className="page-card">
+          <div className="empty-state">
+            <h2>Carregando perfil de acesso...</h2>
+            <p>Consultando o nível de acesso gravado no banco de dados.</p>
+          </div>
+        </section>
+      );
+    }
+
     if (simulatedRole === "terceirizada" && activeMenu !== "terceirizada") {
       return <TerceirizadaVisao />;
     }
@@ -794,13 +880,13 @@ useEffect(() => {
     }
   }
 
-  if (authLoading) {
+  if (authLoading || (user && profileLoading)) {
     return (
       <div className="login-page">
         <div className="login-left">
           <div className="login-box">
             <h1 className="login-title">Sanear Operacional</h1>
-            <p>Carregando...</p>
+            <p>{authLoading ? "Carregando..." : "Carregando perfil de acesso..."}</p>
           </div>
         </div>
         <div className="login-right">
@@ -1043,7 +1129,7 @@ useEffect(() => {
                   menu="buraco"
                   icon="🧱"
                   title="Calçamento"
-                  subtitle="Blocos"
+                  subtitle="Buraco na rua"
                 />
                 <SidebarItem
                   menu="asfalto"
@@ -1080,8 +1166,8 @@ useEffect(() => {
                 <SidebarItem
                   menu="servico_sanear"
                   icon="🛠️"
-                  title="Serviço SANEAR"
-                  subtitle="Serviços internos"
+                  title="Área de Serviço SANEAR"
+                  subtitle="Finalizar hidrojato"
                   emphasis="primary"
                 />
               </div>
@@ -1226,7 +1312,7 @@ useEffect(() => {
             <span className="user2-name" title={userDisplayName}>
               {userDisplayName}
             </span>
-            <span className="user2-role">{simulatedRole.toUpperCase()}</span>
+            <span className="user2-role">{roleLabel}</span>
           </span>
 
           <span className="user2-caret" aria-hidden="true">
@@ -1240,7 +1326,7 @@ useEffect(() => {
               <div className="user2-popover-title">{userDisplayName}</div>
               {user?.email && <div className="user2-popover-email">{user.email}</div>}
               <div className="user2-popover-pill">
-                Perfil: {simulatedRole.toUpperCase()}
+                Perfil: {roleLabel}
               </div>
             </div>
 
