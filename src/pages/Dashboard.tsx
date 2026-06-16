@@ -1373,6 +1373,10 @@ const Dashboard: React.FC = () => {
 
   const activeFutureModule = activeTab === "esgotoRetornando" || activeTab === "esgotoEntupido";
 
+  function navigateMobileWork(menu: string) {
+    window.dispatchEvent(new CustomEvent("sanear:navigate", { detail: { menu } }));
+  }
+
   return (
     <section className="page-card dashboard-layout">
       <div className="dashboard-print-header print-only">
@@ -1511,6 +1515,39 @@ const Dashboard: React.FC = () => {
               <small>{summary.future ? "Reservado" : `${summary.abertas} abertas`}</small>
             </button>
           ))}
+        </div>
+
+        <div className="dashboard-mobile-work-center" aria-label="Central de trabalho mobile">
+          <div className="dashboard-mobile-section-head dashboard-mobile-section-head--inside">
+            <div>
+              <span>Central de trabalho</span>
+              <strong>Atalhos do plantão</strong>
+            </div>
+            <small>Campo</small>
+          </div>
+
+          <div className="dashboard-mobile-work-grid">
+            <button type="button" onClick={() => navigateMobileWork("buraco")}>
+              <span>🧱</span>
+              <strong>Nova calçamento</strong>
+              <small>Buraco na rua</small>
+            </button>
+            <button type="button" onClick={() => navigateMobileWork("asfalto")}>
+              <span>🛣️</span>
+              <strong>Nova asfalto</strong>
+              <small>Tapa-buraco</small>
+            </button>
+            <button type="button" onClick={() => navigateMobileWork("hidrojato")}>
+              <span>🚛</span>
+              <strong>Novo hidrojato</strong>
+              <small>Serviço SANEAR</small>
+            </button>
+            <button type="button" onClick={() => navigateMobileWork("listaOS")}>
+              <span>📋</span>
+              <strong>Consultar OS</strong>
+              <small>PDF, fotos e status</small>
+            </button>
+          </div>
         </div>
 
         <div className="dashboard-mobile-priority-panel">

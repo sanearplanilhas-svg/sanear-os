@@ -4874,3 +4874,721 @@ body {
     transform: translateY(0) scale(1);
   }
 }
+
+/* =========================================================
+   PASSO 5 MOBILE — Filtros da Lista de OS em painel deslizante
+   Desktop continua com filtros completos; celular usa sheet inferior.
+   ========================================================= */
+.os-mobile-filter-bar,
+.os-mobile-filter-backdrop {
+  display: none;
+}
+
+.os-toolbar-smart {
+  align-items: stretch;
+}
+
+.os-toolbar-smart .os-search {
+  align-self: flex-end;
+}
+
+@media (max-width: 760px) {
+  body.mobile-filter-sheet-open {
+    overflow: hidden;
+    touch-action: none;
+  }
+
+  .os-toolbar.os-toolbar-smart {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding: 0.9rem;
+    border: 1px solid rgba(226, 232, 240, 0.95);
+    border-radius: 24px;
+    background:
+      radial-gradient(circle at top left, rgba(37, 99, 235, 0.08), transparent 32%),
+      rgba(255, 255, 255, 0.96);
+    box-shadow: 0 18px 42px rgba(15, 23, 42, 0.07);
+  }
+
+  .os-toolbar-desktop-filters {
+    display: none !important;
+  }
+
+  .os-toolbar-smart .os-search {
+    width: 100%;
+    margin-top: 0;
+    max-width: none;
+    order: 1;
+  }
+
+  .os-toolbar-smart .os-search-input {
+    width: 100%;
+    min-height: 48px;
+    border-radius: 17px;
+    padding-left: 0.95rem;
+    padding-right: 0.95rem;
+    background: #ffffff;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+  }
+
+  .os-mobile-filter-bar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.75rem;
+    align-items: center;
+    order: 2;
+  }
+
+  .os-mobile-filter-summary {
+    min-width: 0;
+    padding: 0.72rem 0.8rem;
+    border: 1px solid rgba(226, 232, 240, 0.9);
+    border-radius: 18px;
+    background: rgba(248, 250, 252, 0.92);
+  }
+
+  .os-mobile-filter-summary span,
+  .os-mobile-filter-summary strong {
+    display: block;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .os-mobile-filter-summary span {
+    color: #64748b;
+    font-size: 0.73rem;
+    font-weight: 850;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+  }
+
+  .os-mobile-filter-summary strong {
+    margin-top: 0.15rem;
+    color: #0f172a;
+    font-size: 0.88rem;
+  }
+
+  .os-mobile-filter-open {
+    min-height: 50px;
+    min-width: 104px;
+    border-radius: 18px;
+    box-shadow: 0 14px 26px rgba(37, 99, 235, 0.22);
+  }
+
+  .os-mobile-filter-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    padding: 0 0 max(0.75rem, env(safe-area-inset-bottom));
+    background: rgba(15, 23, 42, 0.54);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    animation: os-filter-backdrop-in 0.16s ease-out;
+  }
+
+  .os-mobile-filter-sheet {
+    width: min(100%, 540px);
+    max-height: min(88dvh, 760px);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border-radius: 30px 30px 22px 22px;
+    border: 1px solid rgba(226, 232, 240, 0.85);
+    background:
+      radial-gradient(circle at 20% 0%, rgba(37, 99, 235, 0.16), transparent 30%),
+      linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+    box-shadow: 0 -22px 70px rgba(15, 23, 42, 0.34);
+    animation: os-filter-sheet-up 0.2s cubic-bezier(0.2, 0.85, 0.25, 1);
+  }
+
+  .os-mobile-filter-handle {
+    width: 48px;
+    height: 5px;
+    margin: 0.72rem auto 0.45rem;
+    border-radius: 999px;
+    background: #cbd5e1;
+  }
+
+  .os-mobile-filter-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.9rem;
+    padding: 0.2rem 1.1rem 0.85rem;
+  }
+
+  .os-mobile-filter-header span {
+    display: block;
+    color: #2563eb;
+    font-size: 0.72rem;
+    font-weight: 950;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  .os-mobile-filter-header h3 {
+    margin: 0.18rem 0 0;
+    color: #0f172a;
+    font-size: 1.35rem;
+    line-height: 1.05;
+    letter-spacing: -0.04em;
+  }
+
+  .os-mobile-filter-close {
+    width: 42px;
+    height: 42px;
+    border: none;
+    border-radius: 16px;
+    background: #f1f5f9;
+    color: #0f172a;
+    font-size: 1.6rem;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  .os-mobile-filter-current {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.55rem;
+    padding: 0 1.1rem 0.9rem;
+  }
+
+  .os-mobile-filter-current > div {
+    min-width: 0;
+    border: 1px solid rgba(226, 232, 240, 0.95);
+    border-radius: 17px;
+    padding: 0.7rem;
+    background: rgba(255, 255, 255, 0.9);
+  }
+
+  .os-mobile-filter-current span {
+    display: block;
+    color: #94a3b8;
+    font-size: 0.66rem;
+    font-weight: 950;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .os-mobile-filter-current strong {
+    display: block;
+    margin-top: 0.2rem;
+    overflow: hidden;
+    color: #1e293b;
+    font-size: 0.82rem;
+    line-height: 1.2;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .os-mobile-filter-content {
+    flex: 1;
+    overflow: auto;
+    padding: 0.2rem 1.1rem 1rem;
+  }
+
+  .os-mobile-filter-section {
+    margin-top: 0.95rem;
+  }
+
+  .os-mobile-filter-section:first-child {
+    margin-top: 0;
+  }
+
+  .os-mobile-filter-section-title {
+    margin-bottom: 0.52rem;
+    color: #334155;
+    font-size: 0.78rem;
+    font-weight: 950;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .os-mobile-chip-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.55rem;
+  }
+
+  .os-mobile-chip-grid-compact {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .os-mobile-chip,
+  .os-mobile-sort-button {
+    min-height: 48px;
+    border: 1px solid rgba(203, 213, 225, 0.95);
+    border-radius: 16px;
+    background: #ffffff;
+    color: #334155;
+    font-size: 0.84rem;
+    font-weight: 850;
+    line-height: 1.12;
+    cursor: pointer;
+    transition: transform 0.12s ease, border-color 0.12s ease, background 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
+  }
+
+  .os-mobile-chip:active,
+  .os-mobile-sort-button:active {
+    transform: scale(0.98);
+  }
+
+  .os-mobile-chip.is-active,
+  .os-mobile-sort-button.is-active {
+    border-color: rgba(37, 99, 235, 0.62);
+    background: linear-gradient(135deg, #2563eb, #1d4ed8);
+    color: #ffffff;
+    box-shadow: 0 14px 28px rgba(37, 99, 235, 0.22);
+  }
+
+  .os-mobile-filter-date input {
+    min-height: 48px;
+    border-radius: 16px;
+    background: #ffffff;
+  }
+
+  .os-mobile-sort-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.55rem;
+  }
+
+  .os-mobile-filter-footer {
+    display: grid;
+    grid-template-columns: 0.8fr 1.2fr;
+    gap: 0.65rem;
+    padding: 0.9rem 1.1rem calc(0.9rem + env(safe-area-inset-bottom));
+    border-top: 1px solid rgba(226, 232, 240, 0.95);
+    background: rgba(255, 255, 255, 0.92);
+  }
+
+  .os-mobile-filter-footer .btn-primary,
+  .os-mobile-filter-footer .btn-secondary {
+    min-height: 48px;
+    justify-content: center;
+    border-radius: 17px;
+  }
+}
+
+@media (max-width: 390px) {
+  .os-mobile-filter-current,
+  .os-mobile-chip-grid,
+  .os-mobile-sort-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .os-mobile-chip-grid-compact {
+    grid-template-columns: 1fr;
+  }
+}
+
+@keyframes os-filter-backdrop-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes os-filter-sheet-up {
+  from { transform: translateY(18px); opacity: 0.72; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+/* =========================================================
+   MOBILE FINAL — SANEAR Operacional
+   Passos 6, 7, 8 e 9: modais, Serviço SANEAR e polimento geral
+   ========================================================= */
+
+@media (max-width: 760px) {
+  html,
+  body,
+  #root {
+    min-height: 100%;
+    overflow-x: hidden;
+  }
+
+  body {
+    background:
+      radial-gradient(circle at 20% 0%, rgba(37, 99, 235, 0.12), transparent 34%),
+      linear-gradient(180deg, #eef6ff 0%, #f8fafc 36%, #ffffff 100%);
+  }
+
+  .app-shell {
+    min-height: 100dvh;
+  }
+
+  .app-main {
+    min-width: 0;
+  }
+
+  .page-wrapper {
+    padding: 0.86rem 0.72rem calc(6.5rem + env(safe-area-inset-bottom)) !important;
+  }
+
+  .page-card {
+    width: 100%;
+    border-radius: 24px !important;
+    border: 1px solid rgba(226, 232, 240, 0.95) !important;
+    box-shadow: 0 16px 34px rgba(15, 23, 42, 0.08) !important;
+  }
+
+  .page-header {
+    gap: 0.78rem;
+    align-items: flex-start;
+  }
+
+  .page-header h2 {
+    font-size: 1.26rem !important;
+    line-height: 1.12;
+  }
+
+  .page-section-description {
+    font-size: 0.86rem !important;
+    line-height: 1.38 !important;
+  }
+
+  .page-form-grid {
+    grid-template-columns: 1fr !important;
+    gap: 0.72rem !important;
+  }
+
+  .page-section {
+    border-radius: 22px !important;
+    padding: 0.86rem !important;
+  }
+
+  .page-field input,
+  .page-field select,
+  .page-field textarea,
+  .field-readonly,
+  .os-search-input {
+    min-height: 46px;
+    border-radius: 15px !important;
+    font-size: 0.94rem !important;
+  }
+
+  .btn-primary,
+  .btn-secondary,
+  .btn-danger {
+    min-height: 44px;
+    border-radius: 15px !important;
+    font-weight: 900 !important;
+  }
+
+  .status-banner {
+    border-radius: 18px !important;
+    font-size: 0.86rem !important;
+  }
+
+  /* Modais viram painel inferior no celular */
+  .modal-backdrop,
+  .dashboard-modal-backdrop {
+    align-items: flex-end !important;
+    justify-content: center !important;
+    padding: 0.62rem 0.62rem calc(0.72rem + env(safe-area-inset-bottom)) !important;
+    background: rgba(15, 23, 42, 0.48) !important;
+    backdrop-filter: blur(9px);
+  }
+
+  .modal,
+  .dashboard-modal,
+  .dashboard-expanded-modal {
+    width: 100% !important;
+    max-width: none !important;
+    max-height: min(88dvh, 760px) !important;
+    height: auto !important;
+    margin: 0 !important;
+    border-radius: 28px 28px 22px 22px !important;
+    overflow: hidden !important;
+    box-shadow: 0 -20px 60px rgba(15, 23, 42, 0.26) !important;
+  }
+
+  .modal::before,
+  .dashboard-modal::before,
+  .dashboard-expanded-modal::before {
+    content: "";
+    display: block;
+    width: 46px;
+    height: 5px;
+    margin: 0.55rem auto 0.15rem;
+    border-radius: 999px;
+    background: #cbd5e1;
+  }
+
+  .modal-header,
+  .dashboard-modal-header,
+  .dashboard-expanded-header {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    align-items: flex-start !important;
+    gap: 0.7rem !important;
+    padding: 0.74rem 0.9rem !important;
+    background: rgba(255, 255, 255, 0.96) !important;
+    border-bottom: 1px solid #e2e8f0 !important;
+    backdrop-filter: blur(10px);
+  }
+
+  .modal-title,
+  .dashboard-modal-title,
+  .dashboard-expanded-title {
+    font-size: 1.05rem !important;
+    line-height: 1.18 !important;
+  }
+
+  .modal-close,
+  .dashboard-modal-close {
+    flex: 0 0 auto;
+    width: 40px !important;
+    height: 40px !important;
+    border-radius: 15px !important;
+  }
+
+  .modal-body,
+  .dashboard-modal-body,
+  .dashboard-expanded-body {
+    max-height: calc(88dvh - 138px) !important;
+    overflow: auto !important;
+    padding: 0.9rem !important;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .modal-footer,
+  .dashboard-modal-footer,
+  .dashboard-expanded-controls {
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    display: grid !important;
+    grid-template-columns: 1fr !important;
+    gap: 0.52rem !important;
+    padding: 0.72rem 0.9rem calc(0.82rem + env(safe-area-inset-bottom)) !important;
+    background: rgba(255, 255, 255, 0.96) !important;
+    border-top: 1px solid #e2e8f0 !important;
+    backdrop-filter: blur(10px);
+  }
+
+  .modal-footer > *,
+  .dashboard-modal-footer > *,
+  .dashboard-expanded-controls > * {
+    width: 100% !important;
+  }
+
+  /* Modal PDF: viewer adaptado e botão de abrir em nova aba quando o navegador móvel limitar iframe */
+  .modal iframe {
+    min-height: 62dvh;
+    background: #f8fafc;
+  }
+
+  /* Modal de fotos */
+  .modal-photo {
+    height: min(92dvh, 760px) !important;
+    display: flex !important;
+    flex-direction: column !important;
+    padding: 0 !important;
+  }
+
+  .modal-photo-body {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .modal-photo-body img {
+    max-height: 52dvh !important;
+    border-radius: 20px !important;
+    background: #0f172a;
+  }
+
+  .photo-modal-timestamp {
+    margin: 0.55rem 0 0;
+    font-size: 0.78rem;
+    color: #64748b;
+    line-height: 1.32;
+  }
+
+  /* Área de Serviço SANEAR mobile */
+  .servico-sanear-page .terceirizada-banner {
+    display: grid !important;
+    grid-template-columns: 1fr !important;
+    gap: 0.9rem !important;
+    padding: 1rem !important;
+    border-radius: 24px !important;
+  }
+
+  .servico-sanear-page .terceirizada-banner h2 {
+    font-size: 1.24rem !important;
+  }
+
+  .servico-sanear-page .terceirizada-highlight {
+    width: 100%;
+    border-radius: 20px !important;
+  }
+
+  .servico-sanear-page .sla-explainer {
+    align-items: flex-start !important;
+    border-radius: 22px !important;
+    padding: 0.88rem !important;
+  }
+
+  .servico-sanear-page .os-kpi-row {
+    display: grid !important;
+    grid-template-columns: repeat(3, minmax(142px, 1fr)) !important;
+    overflow-x: auto;
+    gap: 0.72rem !important;
+    padding-bottom: 0.2rem;
+    scroll-snap-type: x proximity;
+  }
+
+  .servico-sanear-page .os-kpi-card {
+    min-width: 142px;
+    scroll-snap-align: start;
+    border-radius: 22px !important;
+  }
+
+  .servico-sanear-page .os-toolbar {
+    position: sticky;
+    top: 0.52rem;
+    z-index: 5;
+    border-radius: 22px !important;
+    padding: 0.74rem !important;
+    box-shadow: 0 12px 24px rgba(15, 23, 42, 0.08) !important;
+  }
+
+  .servico-sanear-page .os-status-tabs {
+    display: flex !important;
+    gap: 0.42rem !important;
+    overflow-x: auto;
+    padding-bottom: 0.1rem;
+  }
+
+  .servico-sanear-page .os-status-tab {
+    white-space: nowrap;
+    min-height: 40px;
+    border-radius: 999px !important;
+  }
+
+  .servico-sanear-page .os-list {
+    gap: 0.72rem !important;
+  }
+
+  .servico-sanear-page .os-card {
+    border-radius: 24px !important;
+    padding: 0.9rem !important;
+    box-shadow: 0 12px 26px rgba(15, 23, 42, 0.07) !important;
+  }
+
+  .servico-sanear-page .os-card-header {
+    display: grid !important;
+    grid-template-columns: 1fr !important;
+    gap: 0.62rem !important;
+  }
+
+  .servico-sanear-page .os-card h3 {
+    font-size: 1.02rem !important;
+  }
+
+  .servico-sanear-card-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.52rem;
+    margin-top: 0.76rem;
+  }
+
+  .servico-sanear-modal .modal-body {
+    background: #f8fafc;
+  }
+
+  .truck-choice-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.7rem;
+  }
+
+  .truck-choice-card {
+    min-height: 120px;
+    padding: 0.86rem;
+    border: 1px solid #dbeafe;
+    border-radius: 22px;
+    background: #ffffff;
+    color: #0f172a;
+    text-align: left;
+    cursor: pointer;
+    box-shadow: 0 10px 22px rgba(15, 23, 42, 0.06);
+  }
+
+  .truck-choice-card span {
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    margin-bottom: 0.42rem;
+    border-radius: 16px;
+    background: #e0f2fe;
+    font-size: 1.18rem;
+  }
+
+  .truck-choice-card strong {
+    display: block;
+    font-size: 0.94rem;
+    line-height: 1.12;
+  }
+
+  .truck-choice-card small {
+    display: block;
+    margin-top: 0.22rem;
+    color: #64748b;
+    font-size: 0.76rem;
+    line-height: 1.25;
+  }
+
+  .truck-choice-card.is-selected {
+    border-color: #2563eb;
+    background: linear-gradient(135deg, rgba(37, 99, 235, 0.12), rgba(14, 165, 233, 0.07)), #ffffff;
+    box-shadow: 0 16px 30px rgba(37, 99, 235, 0.14);
+  }
+
+  .truck-choice-card:disabled {
+    cursor: not-allowed;
+    opacity: 0.72;
+  }
+
+  /* Polimento dos cards da lista de OS no celular */
+  .os-mobile-card {
+    border-radius: 24px !important;
+  }
+
+  .os-mobile-actions {
+    grid-template-columns: 1fr 1fr !important;
+    gap: 0.5rem !important;
+  }
+
+  .os-mobile-actions .btn-primary,
+  .os-mobile-actions .btn-secondary {
+    padding-inline: 0.58rem !important;
+  }
+}
+
+@media (max-width: 420px) {
+  .truck-choice-grid,
+  .servico-sanear-card-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .modal-body,
+  .dashboard-modal-body,
+  .dashboard-expanded-body {
+    padding: 0.76rem !important;
+  }
+
+  .modal-footer,
+  .dashboard-modal-footer,
+  .dashboard-expanded-controls {
+    padding-left: 0.76rem !important;
+    padding-right: 0.76rem !important;
+  }
+}

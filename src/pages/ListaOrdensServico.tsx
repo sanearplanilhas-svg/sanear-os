@@ -469,6 +469,7 @@ const ListaOrdensServico: React.FC = () => {
 
   const [busca, setBusca] = useState("");
   const [filtroTipo, setFiltroTipo] = useState<TipoFiltroOs>("TODOS");
+  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
 
   // Destaque automático vindo do alerta de SLA (48h úteis)
   const [highlightRowKey, setHighlightRowKey] = useState<string | null>(null);
@@ -894,6 +895,49 @@ const ListaOrdensServico: React.FC = () => {
     ordenacaoCampo,
     ordenacaoDirecao,
   ]);
+
+  const filtroTipoLabel = useMemo(() => {
+    return tipoFiltroOptions.find((option) => option.value === filtroTipo)?.label ?? "Todos os tipos";
+  }, [filtroTipo]);
+
+  const filtroStatusLabel = useMemo(() => {
+    if (filtroStatus === "ABERTAS") return "Abertas";
+    if (filtroStatus === "FECHADAS") return "Fechadas";
+    return "Todas";
+  }, [filtroStatus]);
+
+  const ordenacaoLabel = useMemo(() => {
+    const campo = ordenacaoCampo === "createdAt" ? "criação" : "execução";
+    const direcao = ordenacaoDirecao === "asc" ? "crescente" : "decrescente";
+    return `${campo}, ${direcao}`;
+  }, [ordenacaoCampo, ordenacaoDirecao]);
+
+  const filtrosAtivosQuantidade = useMemo(() => {
+    let total = 0;
+    if (filtroTipo !== "TODOS") total += 1;
+    if (filtroDataCriacao) total += 1;
+    if (filtroStatus !== "TODAS") total += 1;
+    if (ordenacaoCampo !== "createdAt" || ordenacaoDirecao !== "desc") total += 1;
+    return total;
+  }, [filtroTipo, filtroDataCriacao, filtroStatus, ordenacaoCampo, ordenacaoDirecao]);
+
+  function limparFiltrosLista() {
+    setFiltroTipo("TODOS");
+    setFiltroStatus("TODAS");
+    setFiltroDataCriacao("");
+    setOrdenacaoCampo("createdAt");
+    setOrdenacaoDirecao("desc");
+  }
+
+  useEffect(() => {
+    if (!mobileFiltersOpen) return;
+
+    document.body.classList.add("mobile-filter-sheet-open");
+
+    return () => {
+      document.body.classList.remove("mobile-filter-sheet-open");
+    };
+  }, [mobileFiltersOpen]);
 
   // ======= Destaque / navegação vinda de outras telas (ex.: Alerta SLA) =======
 
@@ -1902,9 +1946,10 @@ async function handleSaveDetails() {
         </div>
       )}
 
-      {/* Filtros + busca (Buscar continua igual) */}
-      <div className="os-toolbar">
+      {/* Filtros + busca (desktop normal, mobile em painel deslizante) */}
+      <div className="os-toolbar os-toolbar-smart">
         <div
+          className="os-toolbar-desktop-filters"
           style={{
             display: "flex",
             flexWrap: "wrap",
@@ -1983,7 +2028,179 @@ async function handleSaveDetails() {
             onChange={handleSearchChange}
           />
         </div>
+
+        <div className="os-mobile-filter-bar">
+          <div className="os-mobile-filter-summary">
+            <span>{filtradas.length} OS encontradas</span>
+            <strong>{filtrosAtivosQuantidade > 0 ? `${filtrosAtivosQuantidade} filtro(s) ativo(s)` : "Sem filtros extras"}</strong>
+          </div>
+          <button
+            type="button"
+            className="btn-primary os-mobile-filter-open"
+            onClick={() => setMobileFiltersOpen(true)}
+          >
+            Filtrar
+          </button>
+        </div>
       </div>
+
+      {mobileFiltersOpen && (
+        <div
+          className="os-mobile-filter-backdrop"
+          onClick={() => setMobileFiltersOpen(false)}
+        >
+          <aside
+            className="os-mobile-filter-sheet"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Filtros da lista de OS"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="os-mobile-filter-handle" />
+
+            <div className="os-mobile-filter-header">
+              <div>
+                <span>Lista de OS</span>
+                <h3>Filtrar ordens</h3>
+              </div>
+              <button
+                type="button"
+                className="os-mobile-filter-close"
+                onClick={() => setMobileFiltersOpen(false)}
+                aria-label="Fechar filtros"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="os-mobile-filter-current">
+              <div>
+                <span>Resultado</span>
+                <strong>{filtradas.length} de {ordens.length} OS</strong>
+              </div>
+              <div>
+                <span>Tipo</span>
+                <strong>{filtroTipoLabel}</strong>
+              </div>
+              <div>
+                <span>Status</span>
+                <strong>{filtroStatusLabel}</strong>
+              </div>
+              <div>
+                <span>Ordem</span>
+                <strong>{ordenacaoLabel}</strong>
+              </div>
+            </div>
+
+            <div className="os-mobile-filter-content">
+              <section className="os-mobile-filter-section">
+                <div className="os-mobile-filter-section-title">Tipo de serviço</div>
+                <div className="os-mobile-chip-grid">
+                  {tipoFiltroOptions.map((option) => (
+                    <button
+                      type="button"
+                      key={option.value}
+                      className={`os-mobile-chip ${filtroTipo === option.value ? "is-active" : ""}`}
+                      onClick={() => setFiltroTipo(option.value)}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </section>
+
+              <section className="os-mobile-filter-section">
+                <div className="os-mobile-filter-section-title">Status</div>
+                <div className="os-mobile-chip-grid os-mobile-chip-grid-compact">
+                  <button
+                    type="button"
+                    className={`os-mobile-chip ${filtroStatus === "TODAS" ? "is-active" : ""}`}
+                    onClick={() => setFiltroStatus("TODAS")}
+                  >
+                    Todas
+                  </button>
+                  <button
+                    type="button"
+                    className={`os-mobile-chip ${filtroStatus === "ABERTAS" ? "is-active" : ""}`}
+                    onClick={() => setFiltroStatus("ABERTAS")}
+                  >
+                    Abertas
+                  </button>
+                  <button
+                    type="button"
+                    className={`os-mobile-chip ${filtroStatus === "FECHADAS" ? "is-active" : ""}`}
+                    onClick={() => setFiltroStatus("FECHADAS")}
+                  >
+                    Fechadas
+                  </button>
+                </div>
+              </section>
+
+              <section className="os-mobile-filter-section">
+                <div className="os-mobile-filter-section-title">Data de criação</div>
+                <div className="page-field os-mobile-filter-date">
+                  <input
+                    type="date"
+                    value={filtroDataCriacao}
+                    onChange={(e) => setFiltroDataCriacao(e.target.value)}
+                  />
+                </div>
+              </section>
+
+              <section className="os-mobile-filter-section">
+                <div className="os-mobile-filter-section-title">Ordenação</div>
+                <div className="os-mobile-sort-grid">
+                  <button
+                    type="button"
+                    className={`os-mobile-sort-button ${ordenacaoCampo === "createdAt" ? "is-active" : ""}`}
+                    onClick={() => setOrdenacaoCampo("createdAt")}
+                  >
+                    Data de criação
+                  </button>
+                  <button
+                    type="button"
+                    className={`os-mobile-sort-button ${ordenacaoCampo === "dataExecucao" ? "is-active" : ""}`}
+                    onClick={() => setOrdenacaoCampo("dataExecucao")}
+                  >
+                    Data de execução
+                  </button>
+                  <button
+                    type="button"
+                    className={`os-mobile-sort-button ${ordenacaoDirecao === "desc" ? "is-active" : ""}`}
+                    onClick={() => setOrdenacaoDirecao("desc")}
+                  >
+                    Mais recentes
+                  </button>
+                  <button
+                    type="button"
+                    className={`os-mobile-sort-button ${ordenacaoDirecao === "asc" ? "is-active" : ""}`}
+                    onClick={() => setOrdenacaoDirecao("asc")}
+                  >
+                    Mais antigas
+                  </button>
+                </div>
+              </section>
+            </div>
+
+            <div className="os-mobile-filter-footer">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={limparFiltrosLista}
+              >
+                Limpar
+              </button>
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => setMobileFiltersOpen(false)}
+              >
+                Ver {filtradas.length} OS
+              </button>
+            </div>
+          </aside>
+        </div>
+      )}
 
       {/* Tabela principal */}
       <div className="os-main">

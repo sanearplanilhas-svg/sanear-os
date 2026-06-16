@@ -526,6 +526,29 @@ const ServicoSanearVisao: React.FC = () => {
                     )}
                     {os.createdByEmail && <span>Por {os.createdByEmail}</span>}
                   </div>
+
+                  <div className="servico-sanear-card-actions">
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        handleOpenPdf(os);
+                      }}
+                    >
+                      Abrir PDF
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        handleOpenModal(os);
+                      }}
+                    >
+                      {isDoneStatus(os.status) ? "Ver dados" : "Finalizar"}
+                    </button>
+                  </div>
                 </article>
               ))}
             </div>
@@ -535,7 +558,7 @@ const ServicoSanearVisao: React.FC = () => {
 
       {modalOs && (
         <div className="modal-backdrop" onClick={handleCloseModal}>
-          <div className="modal" style={{ maxWidth: 900, width: "94%" }} onClick={(e) => e.stopPropagation()}>
+          <div className="modal servico-sanear-modal" style={{ maxWidth: 900, width: "94%" }} onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <div>
                 <h3 className="modal-title">OS de Caminhão Hidrojato</h3>
@@ -630,18 +653,29 @@ const ServicoSanearVisao: React.FC = () => {
 
                 <div className="page-field">
                   <label>Serviço feito por</label>
-                  <select
-                    className="field-readonly"
-                    value={tipoCaminhaoExecucao}
-                    onChange={(e) =>
-                      setTipoCaminhaoExecucao(e.target.value as TipoCaminhaoExecucao | "")
-                    }
-                    disabled={isDoneStatus(modalOs.status) || isUpdating}
-                  >
-                    <option value="">Selecione...</option>
-                    <option value="PROPRIO">Caminhão próprio</option>
-                    <option value="TERCEIRIZADO">Caminhão terceirizado</option>
-                  </select>
+                  <div className="truck-choice-grid" role="group" aria-label="Tipo de caminhão da execução">
+                    <button
+                      type="button"
+                      className={`truck-choice-card ${tipoCaminhaoExecucao === "PROPRIO" ? "is-selected" : ""}`}
+                      onClick={() => setTipoCaminhaoExecucao("PROPRIO")}
+                      disabled={isDoneStatus(modalOs.status) || isUpdating}
+                    >
+                      <span>🚛</span>
+                      <strong>Caminhão próprio</strong>
+                      <small>Equipe e veículo da SANEAR</small>
+                    </button>
+
+                    <button
+                      type="button"
+                      className={`truck-choice-card ${tipoCaminhaoExecucao === "TERCEIRIZADO" ? "is-selected" : ""}`}
+                      onClick={() => setTipoCaminhaoExecucao("TERCEIRIZADO")}
+                      disabled={isDoneStatus(modalOs.status) || isUpdating}
+                    >
+                      <span>🤝</span>
+                      <strong>Caminhão terceirizado</strong>
+                      <small>Apoio contratado para execução</small>
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
