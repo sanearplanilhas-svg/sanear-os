@@ -1,0 +1,24 @@
+﻿Resultado dos Testes E2E
+
+Status: PASSOU
+Inicio: 09/07/2026 12:35:22
+Fim:    09/07/2026 12:37:50
+Tempo:  00:02:27
+
+Passou:   21
+Falhou:   0
+Ignorado: 19
+
+WriteTests:  True
+Nivel2:      False
+Nivel3:      False
+Nivel4:      False
+Headed:      True
+Ui:          False
+SkipInstall: True
+
+Log completo:
+test-results-resumos\teste-telas-20260709-123522.log
+
+Relatorio HTML:
+playwright-report/index.html

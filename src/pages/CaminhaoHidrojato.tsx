@@ -6,12 +6,20 @@ import {
   limit,
   query,
   setDoc,
+  updateDoc,
   serverTimestamp,
   where,
 } from "firebase/firestore";
 import { auth, db } from "../lib/firebaseClient";
 import { supabase } from "../lib/supabaseClient";
-import { SLA_HORAS_PADRAO } from "../lib/sla";
+import { compactFileToZip, ZIP_STORAGE_MIME } from "../lib/storageZip";
+import {
+  extrairDadosOsDoPdf,
+  type DadosOsExtraidos,
+  type ResultadoExtracaoPdfOs,
+} from "../lib/pdfOsExtractor";
+import { getSlaConfig, getSlaHorasPorServico } from "../lib/sla";
+import { salvarAnexoPendente, resumirErroAnexo } from "../lib/anexosPendentes";
 
 type CaminhaoHidrojatoProps = {
   onBack: () => void;
@@ -76,6 +84,10 @@ const CaminhaoHidrojato: React.FC<CaminhaoHidrojatoProps> = ({ onBack }) => {
   const [referencia, setReferencia] = useState("");
   const [observacoes, setObservacoes] = useState("");
   const [pdfOs, setPdfOs] = useState<PdfAnexado | null>(null);
+  const [extractingPdf, setExtractingPdf] = useState(false);
+  const [pdfExtraction, setPdfExtraction] =
+    useState<ResultadoExtracaoPdfOs | null>(null);
+  const [formularioLiberado, setFormularioLiberado] = useState(false);
 
   const [saving, setSaving] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -89,7 +101,7 @@ const CaminhaoHidrojato: React.FC<CaminhaoHidrojatoProps> = ({ onBack }) => {
   const [resultType, setResultType] = useState<"success" | "error">("success");
   const [resultMessage, setResultMessage] = useState("");
 
-  const [mobileStep, setMobileStep] = useState<FormStep>("identificacao");
+  const [mobileStep, setMobileStep] = useState<FormStep>("anexos");
   const currentStepIndex = Math.max(
     0,
     FORM_STEPS.findIndex((step) => step.id === mobileStep)
@@ -145,7 +157,34 @@ const CaminhaoHidrojato: React.FC<CaminhaoHidrojatoProps> = ({ onBack }) => {
     }
   }
 
-  function handlePdfChange(e: ChangeEvent<HTMLInputElement>) {
+  function aplicarDadosExtraidos(dados: DadosOsExtraidos): string[] {
+    const aplicados: string[] = [];
+
+    const aplicar = (
+      valor: string | undefined,
+      atual: string,
+      setter: (value: string) => void,
+      label: string
+    ) => {
+      const normalizado = valor?.trim();
+      if (!normalizado || atual.trim()) return;
+
+      setter(normalizado.toLocaleUpperCase("pt-BR"));
+      aplicados.push(label);
+    };
+
+    aplicar(dados.protocolo, protocolo, setProtocolo, "Protocolo");
+    aplicar(dados.ordemServico, ordemServico, setOrdemServico, "Ordem de Serviço");
+    aplicar(dados.bairro, bairro, setBairro, "Bairro");
+    aplicar(dados.rua, rua, setRua, "Rua");
+    aplicar(dados.numero, numero, setNumero, "Número");
+    aplicar(dados.referencia, referencia, setReferencia, "Ponto de referência");
+    aplicar(dados.observacoes, observacoes, setObservacoes, "Observações");
+
+    return aplicados;
+  }
+
+  async function handlePdfChange(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0] ?? null;
 
     if (!file) return;
@@ -155,6 +194,7 @@ const CaminhaoHidrojato: React.FC<CaminhaoHidrojatoProps> = ({ onBack }) => {
 
     if (!isPdf) {
       setPdfOs(null);
+      setPdfExtraction(null);
       setStatus("Somente arquivo PDF é permitido para a OS.", "error");
       e.target.value = "";
       return;
@@ -173,13 +213,59 @@ const CaminhaoHidrojato: React.FC<CaminhaoHidrojatoProps> = ({ onBack }) => {
       nomeArquivo: file.name,
       dataAnexoTexto,
     });
-    setStatus("PDF da OS anexado com sucesso.", "success");
+    setFormularioLiberado(true);
+    setMobileStep("identificacao");
+    setPdfExtraction(null);
     e.target.value = "";
+
+    try {
+      setExtractingPdf(true);
+      const resultado = await extrairDadosOsDoPdf(file);
+      setPdfExtraction(resultado);
+
+      const aplicados = aplicarDadosExtraidos(resultado.dados);
+
+      if (aplicados.length > 0) {
+        setStatus(
+          `PDF anexado e dados preenchidos automaticamente: ${aplicados.join(
+            ", "
+          )}. Confira antes de salvar.`,
+          "success"
+        );
+        return;
+      }
+
+      if (resultado.aviso) {
+        setStatus(`PDF anexado. ${resultado.aviso}`, "info");
+        return;
+      }
+
+      setStatus(
+        "PDF anexado. Nenhum campo vazio foi preenchido automaticamente.",
+        "info"
+      );
+    } catch (error) {
+      console.error(error);
+      setStatus(
+        "PDF anexado, mas não foi possível ler o texto automaticamente. Preencha ou confira os campos manualmente.",
+        "info"
+      );
+    } finally {
+      setExtractingPdf(false);
+    }
   }
 
   function handleRemoverPdf() {
     setPdfOs(null);
+    setPdfExtraction(null);
+    setExtractingPdf(false);
     setStatus("PDF removido.", "info");
+  }
+
+  function abrirFormularioManual() {
+    setFormularioLiberado(true);
+    setMobileStep("identificacao");
+    setStatus("Preenchimento manual liberado. Você pode informar os dados sem usar o extrator do PDF.", "info");
   }
 
   function handleClear(showInfo: boolean = true) {
@@ -191,7 +277,10 @@ const CaminhaoHidrojato: React.FC<CaminhaoHidrojatoProps> = ({ onBack }) => {
     setReferencia("");
     setObservacoes("");
     setPdfOs(null);
-    setMobileStep("identificacao");
+    setPdfExtraction(null);
+    setExtractingPdf(false);
+    setFormularioLiberado(false);
+    setMobileStep("anexos");
 
     if (showInfo) {
       setStatus("Formulário limpo.", "info");
@@ -254,6 +343,11 @@ const CaminhaoHidrojato: React.FC<CaminhaoHidrojatoProps> = ({ onBack }) => {
     path: string | null;
     nomeArquivo: string | null;
     dataAnexoTexto: string | null;
+    arquivoCompactado: boolean;
+    nomeArquivoZip: string | null;
+    mimeTypeOriginal: string | null;
+    tamanhoOriginal: number | null;
+    tamanhoCompactado: number | null;
   }> {
     if (!pdfOs) {
       return {
@@ -261,22 +355,28 @@ const CaminhaoHidrojato: React.FC<CaminhaoHidrojatoProps> = ({ onBack }) => {
         path: null,
         nomeArquivo: null,
         dataAnexoTexto: null,
+        arquivoCompactado: false,
+        nomeArquivoZip: null,
+        mimeTypeOriginal: null,
+        tamanhoOriginal: null,
+        tamanhoCompactado: null,
       };
     }
 
-    const safeName = sanitizeForStoragePath(pdfOs.nomeArquivo || "ordem-servico.pdf");
+    const compactado = await compactFileToZip(pdfOs.file);
+    const safeName = sanitizeForStoragePath(compactado.zipFileName || "ordem-servico.pdf.zip");
     const path = `${STORAGE_BASE_PATH}/${ordemId}/os-pdf/${Date.now()}-${safeName}`;
 
     const { error: uploadError } = await supabase.storage
       .from(STORAGE_BUCKET)
-      .upload(path, pdfOs.file, {
-        upsert: true,
-        contentType: "application/pdf",
+      .upload(path, compactado.blob, {
+        upsert: false,
+        contentType: ZIP_STORAGE_MIME,
       });
 
     if (uploadError) {
       console.error(uploadError);
-      throw new Error(`Erro ao enviar o PDF "${pdfOs.nomeArquivo}" para o armazenamento.`);
+      throw new Error(`Erro ao enviar o PDF "${pdfOs.nomeArquivo}" compactado em ZIP para o armazenamento.`);
     }
 
     const { data: publicData } = supabase.storage
@@ -288,6 +388,26 @@ const CaminhaoHidrojato: React.FC<CaminhaoHidrojatoProps> = ({ onBack }) => {
       path,
       nomeArquivo: pdfOs.nomeArquivo,
       dataAnexoTexto: pdfOs.dataAnexoTexto,
+      arquivoCompactado: true,
+      nomeArquivoZip: compactado.zipFileName,
+      mimeTypeOriginal: compactado.originalMimeType,
+      tamanhoOriginal: compactado.originalSize,
+      tamanhoCompactado: compactado.zipSize,
+    };
+  }
+
+
+  function getPdfDataVazio(): Awaited<ReturnType<typeof uploadPdf>> {
+    return {
+      url: null,
+      path: null,
+      nomeArquivo: null,
+      dataAnexoTexto: null,
+      arquivoCompactado: false,
+      nomeArquivoZip: null,
+      mimeTypeOriginal: null,
+      tamanhoOriginal: null,
+      tamanhoCompactado: null,
     };
   }
 
@@ -305,7 +425,9 @@ const CaminhaoHidrojato: React.FC<CaminhaoHidrojatoProps> = ({ onBack }) => {
     }
 
     const protocoloNormalizado = protocolo.trim().toLocaleUpperCase("pt-BR");
-    const ordemServicoNormalizada = ordemServico.trim().toLocaleUpperCase("pt-BR");
+    const ordemServicoNormalizada = ordemServico
+      .trim()
+      .toLocaleUpperCase("pt-BR");
 
     try {
       setSaving(true);
@@ -326,9 +448,12 @@ const CaminhaoHidrojato: React.FC<CaminhaoHidrojatoProps> = ({ onBack }) => {
         return;
       }
 
+      const slaConfigCadastro = getSlaConfig("HIDROJATO");
+
       const ordensRef = collection(db, COLLECTION_NAME);
       const ordemRef = doc(ordensRef);
-      const pdfData = await uploadPdf(ordemRef.id);
+      const pdfDataVazio = getPdfDataVazio();
+      const anexoInicial: "PENDENTE" | "SEM_ANEXO" = pdfOs ? "PENDENTE" : "SEM_ANEXO";
 
       await setDoc(ordemRef, {
         tipo: "HIDROJATO",
@@ -337,14 +462,18 @@ const CaminhaoHidrojato: React.FC<CaminhaoHidrojatoProps> = ({ onBack }) => {
         bairro: bairro.trim() || null,
         rua: rua.trim() || null,
         numero: numero.trim() || null,
-        referencia: referencia.trim() || null,
         pontoReferencia: referencia.trim() || null,
+        referencia: referencia.trim() || null,
         observacoes: observacoes.trim() || null,
         status: "ABERTA",
         areaExecucao: "SERVICO_SANEAR",
         destinoExecucao: "SERVICO_SANEAR",
         exibirNaTerceirizada: false,
-        slaHoras: SLA_HORAS_PADRAO,
+        slaServico: "HIDROJATO",
+        slaLabel: slaConfigCadastro.label,
+        slaPrioridade: slaConfigCadastro.prioridade,
+        slaConfigVersao: 1,
+        slaHoras: getSlaHorasPorServico("HIDROJATO"),
         slaPausas: [],
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
@@ -352,26 +481,111 @@ const CaminhaoHidrojato: React.FC<CaminhaoHidrojatoProps> = ({ onBack }) => {
         createdByUid: auth.currentUser?.uid ?? null,
         fotos: [],
         fotosExecucao: [],
-        ordemServicoPdfUrl: pdfData.url,
-        ordemServicoPdfPath: pdfData.path,
-        ordemServicoPdfNomeArquivo: pdfData.nomeArquivo,
-        ordemServicoPdfDataAnexo: pdfData.dataAnexoTexto,
-        ordemServicoPdf: pdfData.url
-          ? {
+        anexoStatus: anexoInicial,
+        ordemServicoPdfStatus: anexoInicial,
+        ordemServicoPdfPendenteId: null,
+        anexosPendentes: [],
+        ordemServicoPdfUrl: pdfDataVazio.url,
+        ordemServicoPdfPath: pdfDataVazio.path,
+        ordemServicoPdfNomeArquivo: pdfDataVazio.nomeArquivo,
+        ordemServicoPdfDataAnexo: pdfDataVazio.dataAnexoTexto,
+        ordemServicoPdfCompactado: pdfDataVazio.arquivoCompactado,
+        ordemServicoPdfNomeArquivoZip: pdfDataVazio.nomeArquivoZip,
+        ordemServicoPdfMimeTypeOriginal: pdfDataVazio.mimeTypeOriginal,
+        ordemServicoPdfTamanhoOriginal: pdfDataVazio.tamanhoOriginal,
+        ordemServicoPdfTamanhoCompactado: pdfDataVazio.tamanhoCompactado,
+        ordemServicoPdf: null,
+      });
+
+      let anexoStatusFinal: "OK" | "PENDENTE" | "SEM_ANEXO" = pdfOs ? "PENDENTE" : "SEM_ANEXO";
+
+      if (pdfOs) {
+        try {
+          const pdfData = await uploadPdf(ordemRef.id);
+
+          await updateDoc(ordemRef, {
+            anexoStatus: "OK",
+            ordemServicoPdfStatus: "OK",
+            ordemServicoPdfPendenteId: null,
+            anexosPendentes: [],
+            ordemServicoPdfUrl: pdfData.url,
+            ordemServicoPdfPath: pdfData.path,
+            ordemServicoPdfNomeArquivo: pdfData.nomeArquivo,
+            ordemServicoPdfDataAnexo: pdfData.dataAnexoTexto,
+            ordemServicoPdfCompactado: pdfData.arquivoCompactado,
+            ordemServicoPdfNomeArquivoZip: pdfData.nomeArquivoZip,
+            ordemServicoPdfMimeTypeOriginal: pdfData.mimeTypeOriginal,
+            ordemServicoPdfTamanhoOriginal: pdfData.tamanhoOriginal,
+            ordemServicoPdfTamanhoCompactado: pdfData.tamanhoCompactado,
+            ordemServicoPdf: {
               url: pdfData.url,
               path: pdfData.path,
               nomeArquivo: pdfData.nomeArquivo,
               dataAnexoTexto: pdfData.dataAnexoTexto,
-            }
-          : null,
-      });
+              arquivoCompactado: pdfData.arquivoCompactado,
+              nomeArquivoZip: pdfData.nomeArquivoZip,
+              mimeTypeOriginal: pdfData.mimeTypeOriginal,
+              tamanhoOriginal: pdfData.tamanhoOriginal,
+              tamanhoCompactado: pdfData.tamanhoCompactado,
+            },
+            updatedAt: serverTimestamp(),
+          });
+
+          anexoStatusFinal = "OK";
+        } catch (uploadError: unknown) {
+          console.error(uploadError);
+
+          const pendente = await salvarAnexoPendente({
+            tipo: "PDF_OS",
+            osId: ordemRef.id,
+            collectionName: COLLECTION_NAME,
+            origem: "HIDROJATO",
+            storageBasePath: STORAGE_BASE_PATH,
+            storageSubfolder: "os-pdf",
+            nomeArquivo: pdfOs.nomeArquivo,
+            mimeType: pdfOs.file.type || "application/pdf",
+            tamanho: pdfOs.file.size,
+            criadoPorEmail: auth.currentUser?.email?.toLowerCase() ?? null,
+            observacao: "PDF da OS salvo localmente porque o envio ao Supabase falhou após a OS já ter sido cadastrada.",
+            ultimoErro: resumirErroAnexo(uploadError),
+            arquivo: pdfOs.file,
+          });
+
+          await updateDoc(ordemRef, {
+            anexoStatus: "PENDENTE",
+            ordemServicoPdfStatus: "PENDENTE",
+            ordemServicoPdfPendenteId: pendente.id,
+            anexosPendentes: [
+              {
+                id: pendente.id,
+                tipo: "PDF_OS",
+                nomeArquivo: pdfOs.nomeArquivo,
+                criadoEmTexto: new Date().toLocaleString("pt-BR", {
+                  day: "2-digit",
+                  month: "2-digit",
+                  year: "numeric",
+                  hour: "2-digit",
+                  minute: "2-digit",
+                }),
+              },
+            ],
+            updatedAt: serverTimestamp(),
+          });
+
+          anexoStatusFinal = "PENDENTE";
+        }
+      }
 
       handleClear(false);
       setCamposAusentes([]);
       setShowMissingFieldsModal(false);
       setStatusMessage(null);
       setResultType("success");
-      setResultMessage("Ordem de serviço de Caminhão Hidrojato cadastrada com sucesso.");
+      setResultMessage(
+        anexoStatusFinal === "PENDENTE"
+          ? "Ordem de serviço de Caminhão Hidrojato cadastrada. O PDF não foi enviado agora e ficou salvo na fila local de anexos pendentes para reenvio."
+          : "Ordem de serviço de Caminhão Hidrojato cadastrada com sucesso."
+      );
       setShowResultModal(true);
     } catch (error: unknown) {
       console.error(error);
@@ -413,6 +627,8 @@ const CaminhaoHidrojato: React.FC<CaminhaoHidrojatoProps> = ({ onBack }) => {
         className="page-form page-form-mobile-wizard"
         onSubmit={(e: FormEvent<HTMLFormElement>) => e.preventDefault()}
       >
+        {formularioLiberado && (
+          <>
         <div className="mobile-form-progress" aria-label="Etapas do cadastro">
           {FORM_STEPS.map((step, index) => (
             <button
@@ -524,6 +740,9 @@ const CaminhaoHidrojato: React.FC<CaminhaoHidrojatoProps> = ({ onBack }) => {
           </div>
         </div>
 
+          </>
+        )}
+
         <div className={`page-section mobile-form-panel ${mobileStep === "anexos" ? "is-active" : ""}`}>
           <h3>OS em PDF</h3>
           <p className="page-section-description">
@@ -535,9 +754,55 @@ const CaminhaoHidrojato: React.FC<CaminhaoHidrojatoProps> = ({ onBack }) => {
               <label>Anexar OS em PDF</label>
               <input type="file" accept="application/pdf,.pdf" onChange={handlePdfChange} />
               <p className="photo-hint">
-                Somente arquivo PDF. O arquivo será salvo no Storage e vinculado à OS cadastrada.
+                Somente arquivo PDF. O sistema tentará ler o arquivo e preencher os campos automaticamente antes de compactar em ZIP.
               </p>
             </div>
+
+            {!formularioLiberado && !extractingPdf && (
+              <div className="mobile-review-card">
+                <div>
+                  <span>Comece pela OS em PDF</span>
+                  <strong>Anexe a ordem de serviço para o sistema preencher os dados automaticamente.</strong>
+                </div>
+                <button type="button" className="btn-secondary" onClick={abrirFormularioManual}>
+                  Preencher manualmente
+                </button>
+              </div>
+            )}
+
+            {extractingPdf && (
+              <div className="mobile-review-card">
+                <div>
+                  <span>Leitura automática</span>
+                  <strong>Lendo texto do PDF...</strong>
+                </div>
+              </div>
+            )}
+
+            {pdfExtraction && !extractingPdf && (
+              <div className="mobile-review-card">
+                <div>
+                  <span>Campos encontrados no PDF</span>
+                  <strong>
+                    {pdfExtraction.camposEncontrados.length > 0
+                      ? pdfExtraction.camposEncontrados.join(", ")
+                      : "Nenhum campo identificado automaticamente"}
+                  </strong>
+                </div>
+                {pdfExtraction.dados.tipoServico && (
+                  <div>
+                    <span>Tipo sugerido pelo PDF</span>
+                    <strong>{pdfExtraction.dados.tipoServico}</strong>
+                  </div>
+                )}
+                {pdfExtraction.aviso && (
+                  <div>
+                    <span>Aviso</span>
+                    <strong>{pdfExtraction.aviso}</strong>
+                  </div>
+                )}
+              </div>
+            )}
 
             {pdfOs && (
               <div className="status-banner status-info" style={{ marginTop: "0.75rem" }}>
@@ -552,6 +817,8 @@ const CaminhaoHidrojato: React.FC<CaminhaoHidrojatoProps> = ({ onBack }) => {
           </div>
         </div>
 
+        {formularioLiberado && (
+          <>
         <div
           className={`page-section mobile-form-panel mobile-confirmation-panel ${
             mobileStep === "confirmacao" ? "is-active" : ""
@@ -643,6 +910,8 @@ const CaminhaoHidrojato: React.FC<CaminhaoHidrojatoProps> = ({ onBack }) => {
             </button>
           )}
         </div>
+          </>
+        )}
       </form>
 
       {showMissingFieldsModal && (

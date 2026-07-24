@@ -303,3 +303,145 @@
   pointer-events: none;
   user-select: none;
 }
+
+/* Ajuste visual — Área da Terceirizada padronizada */
+.terceirizada-executora-page .terceirizada-banner {
+  position: relative;
+  overflow: hidden;
+  margin-bottom: 1rem;
+  padding: 1.45rem 1.55rem;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 1.35rem;
+  background:
+    radial-gradient(circle at 92% 6%, rgba(34, 197, 94, 0.28), transparent 30%),
+    linear-gradient(135deg, #082f49 0%, #075985 52%, #064e3b 100%);
+  color: #ffffff;
+  box-shadow: 0 18px 46px rgba(8, 47, 73, 0.18);
+}
+
+.terceirizada-executora-page .terceirizada-banner > * {
+  position: relative;
+  z-index: 1;
+}
+
+.terceirizada-executora-page .terceirizada-banner h2,
+.terceirizada-executora-page .terceirizada-banner p,
+.terceirizada-executora-page .terceirizada-pill {
+  color: #ffffff;
+}
+
+.terceirizada-executora-page .terceirizada-highlight {
+  min-width: 190px;
+  padding: 0.9rem 1rem;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(15, 118, 110, 0.68);
+  backdrop-filter: blur(12px);
+}
+
+.terceirizada-executora-page .terceirizada-highlight span,
+.terceirizada-executora-page .terceirizada-highlight strong {
+  display: block;
+  color: #ffffff;
+}
+
+.terceirizada-filter-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.terceirizada-executora-page .os-category-tabs {
+  max-width: 100%;
+}
+
+.terceirizada-executora-page .os-badge-terceirizada {
+  background: #e0f2fe;
+  color: #075985;
+}
+
+.terceirizada-page-group + .terceirizada-page-group {
+  margin-top: 1rem;
+}
+
+.terceirizada-executora-page .os-group-header-sub {
+  margin: 0.65rem 0 0.55rem;
+  padding-top: 0.2rem;
+  border-top: 1px dashed #dbe5ef;
+}
+
+.os-pagination-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin: 0.75rem 0 1rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid #dbe5ef;
+  border-radius: 16px;
+  background: #ffffff;
+  color: #475569;
+  font-size: 0.95rem;
+}
+
+.os-pagination-bar strong {
+  color: #0f172a;
+}
+
+.os-pagination-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.os-pagination-actions span {
+  color: #0f172a;
+  font-weight: 800;
+}
+
+.os-pagination-bar-bottom {
+  margin-top: 1rem;
+}
+
+.terceirizada-os-card {
+  border-left: 5px solid #2563eb;
+}
+
+.terceirizada-os-card.is-done {
+  border-left-color: #16a34a;
+}
+
+.terceirizada-os-card.is-open {
+  border-left-color: #f97316;
+}
+
+.terceirizada-executora-page .servico-sanear-card-actions {
+  justify-content: flex-start;
+}
+
+.terceirizada-execution-summary {
+  border: 1px solid #dbeafe;
+  border-radius: 1rem;
+  background: linear-gradient(135deg, #eff6ff, #ffffff);
+  padding: 1rem;
+}
+
+@media (max-width: 760px) {
+  .terceirizada-filter-row,
+  .os-pagination-bar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .os-pagination-actions,
+  .terceirizada-filter-row .os-search {
+    width: 100%;
+  }
+
+  .os-pagination-actions .btn-secondary {
+    flex: 1 1 auto;
+  }
+}

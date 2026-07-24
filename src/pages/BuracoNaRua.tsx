@@ -6,33 +6,47 @@ import {
   limit,
   query,
   setDoc,
+  updateDoc,
   serverTimestamp,
   where,
 } from "firebase/firestore";
 import { auth, db } from "../lib/firebaseClient";
 import { supabase } from "../lib/supabaseClient";
+import { compactFileToZip, ZIP_STORAGE_MIME } from "../lib/storageZip";
+import {
+  extrairDadosOsDoPdf,
+  type DadosOsExtraidos,
+  type ResultadoExtracaoPdfOs,
+} from "../lib/pdfOsExtractor";
 
-import { SLA_HORAS_PADRAO } from "../lib/sla";
+import { getSlaConfig, getSlaHorasPorServico } from "../lib/sla";
+import { salvarAnexoPendente, resumirErroAnexo } from "../lib/anexosPendentes";
 type BuracoNaRuaProps = {
   onBack: () => void;
 };
 
-type FotoAnexada = {
-  id: string;
-  url: string;
-  timestamp: string;
+type PdfAnexado = {
   file: File;
+  nomeArquivo: string;
+  dataAnexoTexto: string;
 };
 
 type StatusType = "success" | "error" | "info";
 
 const STORAGE_BUCKET = "os-arquivos";
 
+function sanitizeForStoragePath(name: string): string {
+  return name
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9.\-_]/g, "_");
+}
+
 const FORM_STEPS = [
   { id: "identificacao", label: "Identificação", short: "ID" },
   { id: "local", label: "Local", short: "Local" },
   { id: "detalhes", label: "Detalhes", short: "Obs." },
-  { id: "anexos", label: "Fotos", short: "Fotos" },
+  { id: "anexos", label: "PDF", short: "PDF" },
   { id: "confirmacao", label: "Confirmar", short: "OK" },
 ] as const;
 
@@ -45,7 +59,8 @@ type CampoForm =
   | "rua"
   | "numero"
   | "referencia"
-  | "observacoes";
+  | "observacoes"
+  | "pdfOs";
 
 const LABELS_CAMPOS: Record<CampoForm, string> = {
   protocolo: "Protocolo",
@@ -55,6 +70,7 @@ const LABELS_CAMPOS: Record<CampoForm, string> = {
   numero: "Número",
   referencia: "Ponto de referência",
   observacoes: "Observações",
+  pdfOs: "OS em PDF",
 };
 
 const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
@@ -65,9 +81,11 @@ const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
   const [numero, setNumero] = useState("");
   const [referencia, setReferencia] = useState("");
   const [observacoes, setObservacoes] = useState("");
-
-  const [fotos, setFotos] = useState<FotoAnexada[]>([]);
-  const [fotoEmPreview, setFotoEmPreview] = useState<FotoAnexada | null>(null);
+  const [pdfOs, setPdfOs] = useState<PdfAnexado | null>(null);
+  const [extractingPdf, setExtractingPdf] = useState(false);
+  const [pdfExtraction, setPdfExtraction] =
+    useState<ResultadoExtracaoPdfOs | null>(null);
+  const [formularioLiberado, setFormularioLiberado] = useState(false);
 
   const [saving, setSaving] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -82,7 +100,7 @@ const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
   const [resultType, setResultType] = useState<"success" | "error">("success");
   const [resultMessage, setResultMessage] = useState("");
 
-  const [mobileStep, setMobileStep] = useState<FormStep>("identificacao");
+  const [mobileStep, setMobileStep] = useState<FormStep>("anexos");
   const currentStepIndex = Math.max(
     0,
     FORM_STEPS.findIndex((step) => step.id === mobileStep)
@@ -110,7 +128,7 @@ const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
     setStatusType(type);
   }
 
-  function handleInputChange(campo: CampoForm, value: string) {
+  function handleInputChange(campo: Exclude<CampoForm, "pdfOs">, value: string) {
     const upper = value.toLocaleUpperCase("pt-BR");
 
     switch (campo) {
@@ -139,23 +157,48 @@ const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
 
   }
 
-  function handleFotosChange(e: ChangeEvent<HTMLInputElement>) {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
+  function aplicarDadosExtraidos(dados: DadosOsExtraidos): string[] {
+    const aplicados: string[] = [];
 
-    const arquivos = Array.from(files);
-    const apenasImagens = arquivos.filter((file) =>
-      file.type.startsWith("image/")
-    );
+    const aplicar = (
+      valor: string | undefined,
+      atual: string,
+      setter: (value: string) => void,
+      label: string
+    ) => {
+      const normalizado = valor?.trim();
+      if (!normalizado || atual.trim()) return;
 
-    if (apenasImagens.length === 0) {
-      setStatus("Apenas arquivos de imagem são permitidos.", "error");
+      setter(normalizado.toLocaleUpperCase("pt-BR"));
+      aplicados.push(label);
+    };
+
+    aplicar(dados.protocolo, protocolo, setProtocolo, "Protocolo");
+    aplicar(dados.ordemServico, ordemServico, setOrdemServico, "Ordem de Serviço");
+    aplicar(dados.bairro, bairro, setBairro, "Bairro");
+    aplicar(dados.rua, rua, setRua, "Rua");
+    aplicar(dados.numero, numero, setNumero, "Número");
+    aplicar(dados.referencia, referencia, setReferencia, "Ponto de referência");
+    aplicar(dados.observacoes, observacoes, setObservacoes, "Observações");
+
+    return aplicados;
+  }
+
+  async function handlePdfChange(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const isPdf =
+      file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+
+    if (!isPdf) {
+      setStatus("Somente arquivo PDF é permitido para a Ordem de Serviço.", "error");
       e.target.value = "";
       return;
     }
 
     const agora = new Date();
-    const timestampStr = agora.toLocaleString("pt-BR", {
+    const dataAnexoTexto = agora.toLocaleString("pt-BR", {
       day: "2-digit",
       month: "2-digit",
       year: "numeric",
@@ -163,39 +206,64 @@ const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
       minute: "2-digit",
     });
 
-    apenasImagens.forEach((file) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const url = reader.result as string;
-        setFotos((prev) => [
-          ...prev,
-          {
-            id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-            url,
-            timestamp: timestampStr,
-            file,
-          },
-        ]);
-      };
-      reader.readAsDataURL(file);
+    setPdfOs({
+      file,
+      nomeArquivo: file.name,
+      dataAnexoTexto,
     });
-
+    setFormularioLiberado(true);
+    setMobileStep("identificacao");
+    setPdfExtraction(null);
     e.target.value = "";
-    setStatus("Foto(s) anexada(s) com sucesso.", "success");
+
+    try {
+      setExtractingPdf(true);
+      const resultado = await extrairDadosOsDoPdf(file);
+      setPdfExtraction(resultado);
+
+      const aplicados = aplicarDadosExtraidos(resultado.dados);
+
+      if (aplicados.length > 0) {
+        setStatus(
+          `PDF anexado e dados preenchidos automaticamente: ${aplicados.join(
+            ", "
+          )}. Confira antes de salvar.`,
+          "success"
+        );
+        return;
+      }
+
+      if (resultado.aviso) {
+        setStatus(`PDF anexado. ${resultado.aviso}`, "info");
+        return;
+      }
+
+      setStatus(
+        "PDF anexado. Nenhum campo vazio foi preenchido automaticamente.",
+        "info"
+      );
+    } catch (error) {
+      console.error(error);
+      setStatus(
+        "PDF anexado, mas não foi possível ler o texto automaticamente. Preencha ou confira os campos manualmente.",
+        "info"
+      );
+    } finally {
+      setExtractingPdf(false);
+    }
   }
 
-  function handleOpenPreview(foto: FotoAnexada) {
-    setFotoEmPreview(foto);
+  function handleRemovePdf() {
+    setPdfOs(null);
+    setPdfExtraction(null);
+    setExtractingPdf(false);
+    setStatus("PDF removido.", "info");
   }
 
-  function handleClosePreview() {
-    setFotoEmPreview(null);
-  }
-
-  function handleExcluirFoto(id: string) {
-    setFotos((prev) => prev.filter((f) => f.id !== id));
-    setFotoEmPreview(null);
-    setStatus("Foto removida.", "info");
+  function abrirFormularioManual() {
+    setFormularioLiberado(true);
+    setMobileStep("identificacao");
+    setStatus("Preenchimento manual liberado. Você pode informar os dados sem usar o extrator do PDF.", "info");
   }
 
   // showInfo: se false, não mostra "Formulário limpo."
@@ -207,9 +275,11 @@ const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
     setNumero("");
     setReferencia("");
     setObservacoes("");
-    setFotos([]);
-    setFotoEmPreview(null);
-    setMobileStep("identificacao");
+    setPdfOs(null);
+    setPdfExtraction(null);
+    setExtractingPdf(false);
+    setFormularioLiberado(false);
+    setMobileStep("anexos");
     if (showInfo) {
       setStatus("Formulário limpo.", "info");
     }
@@ -224,6 +294,7 @@ const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
       numero,
       referencia,
       observacoes,
+      pdfOs: pdfOs ? "OK" : "",
     };
 
     return (Object.keys(valores) as CampoForm[])
@@ -269,6 +340,79 @@ const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
     return duplicidades;
   }
 
+  async function uploadPdf(ordemId: string): Promise<{
+    url: string | null;
+    path: string | null;
+    nomeArquivo: string | null;
+    dataAnexoTexto: string | null;
+    arquivoCompactado: boolean;
+    nomeArquivoZip: string | null;
+    mimeTypeOriginal: string | null;
+    tamanhoOriginal: number | null;
+    tamanhoCompactado: number | null;
+  }> {
+    if (!pdfOs) {
+      return {
+        url: null,
+        path: null,
+        nomeArquivo: null,
+        dataAnexoTexto: null,
+        arquivoCompactado: false,
+        nomeArquivoZip: null,
+        mimeTypeOriginal: null,
+        tamanhoOriginal: null,
+        tamanhoCompactado: null,
+      };
+    }
+
+    const compactado = await compactFileToZip(pdfOs.file);
+    const safeName = sanitizeForStoragePath(compactado.zipFileName || "ordem-servico.pdf.zip");
+    const path = `calcamento/${ordemId}/os-pdf/${Date.now()}-${safeName}`;
+
+    const { error: uploadError } = await supabase.storage
+      .from(STORAGE_BUCKET)
+      .upload(path, compactado.blob, {
+        upsert: false,
+        contentType: ZIP_STORAGE_MIME,
+      });
+
+    if (uploadError) {
+      console.error(uploadError);
+      throw new Error(`Erro ao enviar o PDF "${pdfOs.nomeArquivo}" compactado em ZIP para o armazenamento.`);
+    }
+
+    const { data: publicData } = supabase.storage
+      .from(STORAGE_BUCKET)
+      .getPublicUrl(path);
+
+    return {
+      url: publicData.publicUrl,
+      path,
+      nomeArquivo: pdfOs.nomeArquivo,
+      dataAnexoTexto: pdfOs.dataAnexoTexto,
+      arquivoCompactado: true,
+      nomeArquivoZip: compactado.zipFileName,
+      mimeTypeOriginal: compactado.originalMimeType,
+      tamanhoOriginal: compactado.originalSize,
+      tamanhoCompactado: compactado.zipSize,
+    };
+  }
+
+
+  function getPdfDataVazio(): Awaited<ReturnType<typeof uploadPdf>> {
+    return {
+      url: null,
+      path: null,
+      nomeArquivo: null,
+      dataAnexoTexto: null,
+      arquivoCompactado: false,
+      nomeArquivoZip: null,
+      mimeTypeOriginal: null,
+      tamanhoOriginal: null,
+      tamanhoCompactado: null,
+    };
+  }
+
   async function handleSave(continuarComCamposVazios = false) {
     setStatusMessage(null);
 
@@ -306,41 +450,12 @@ const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
         return;
       }
 
+      const slaConfigCadastro = getSlaConfig("CALCAMENTO");
+
       const ordensRef = collection(db, "ordens_servico");
       const ordemRef = doc(ordensRef);
-
-      const fotosData: {
-        id: string;
-        nomeArquivo: string;
-        dataAnexoTexto: string;
-        url: string;
-      }[] = [];
-
-      for (const foto of fotos) {
-        const path = `calcamento/${ordemRef.id}/fotos/${foto.id}-${foto.file.name}`;
-
-        const { error: uploadError } = await supabase.storage
-          .from(STORAGE_BUCKET)
-          .upload(path, foto.file, { upsert: true });
-
-        if (uploadError) {
-          console.error(uploadError);
-          throw new Error(
-            `Erro ao enviar foto "${foto.file.name}" para o armazenamento.`
-          );
-        }
-
-        const { data: publicData } = supabase.storage
-          .from(STORAGE_BUCKET)
-          .getPublicUrl(path);
-
-        fotosData.push({
-          id: foto.id,
-          nomeArquivo: foto.file.name,
-          dataAnexoTexto: foto.timestamp,
-          url: publicData.publicUrl,
-        });
-      }
+      const pdfDataVazio = getPdfDataVazio();
+      const anexoInicial: "PENDENTE" | "SEM_ANEXO" = pdfOs ? "PENDENTE" : "SEM_ANEXO";
 
       await setDoc(ordemRef, {
         tipo: "BURACO_RUA",
@@ -353,21 +468,123 @@ const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
         referencia: referencia.trim() || null,
         observacoes: observacoes.trim() || null,
         status: "ABERTA",
-        slaHoras: SLA_HORAS_PADRAO,
+        slaServico: "CALCAMENTO",
+        slaLabel: slaConfigCadastro.label,
+        slaPrioridade: slaConfigCadastro.prioridade,
+        slaConfigVersao: 1,
+        slaHoras: getSlaHorasPorServico("CALCAMENTO"),
         slaPausas: [],
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
         createdByEmail: auth.currentUser?.email?.toLowerCase() ?? null,
         createdByUid: auth.currentUser?.uid ?? null,
-        fotos: fotosData,
+        fotos: [],
+        fotosExecucao: [],
+        anexoStatus: anexoInicial,
+        ordemServicoPdfStatus: anexoInicial,
+        ordemServicoPdfPendenteId: null,
+        anexosPendentes: [],
+        ordemServicoPdfUrl: pdfDataVazio.url,
+        ordemServicoPdfPath: pdfDataVazio.path,
+        ordemServicoPdfNomeArquivo: pdfDataVazio.nomeArquivo,
+        ordemServicoPdfDataAnexo: pdfDataVazio.dataAnexoTexto,
+        ordemServicoPdfCompactado: pdfDataVazio.arquivoCompactado,
+        ordemServicoPdfNomeArquivoZip: pdfDataVazio.nomeArquivoZip,
+        ordemServicoPdfMimeTypeOriginal: pdfDataVazio.mimeTypeOriginal,
+        ordemServicoPdfTamanhoOriginal: pdfDataVazio.tamanhoOriginal,
+        ordemServicoPdfTamanhoCompactado: pdfDataVazio.tamanhoCompactado,
+        ordemServicoPdf: null,
       });
+
+      let anexoStatusFinal: "OK" | "PENDENTE" | "SEM_ANEXO" = pdfOs ? "PENDENTE" : "SEM_ANEXO";
+
+      if (pdfOs) {
+        try {
+          const pdfData = await uploadPdf(ordemRef.id);
+
+          await updateDoc(ordemRef, {
+            anexoStatus: "OK",
+            ordemServicoPdfStatus: "OK",
+            ordemServicoPdfPendenteId: null,
+            anexosPendentes: [],
+            ordemServicoPdfUrl: pdfData.url,
+            ordemServicoPdfPath: pdfData.path,
+            ordemServicoPdfNomeArquivo: pdfData.nomeArquivo,
+            ordemServicoPdfDataAnexo: pdfData.dataAnexoTexto,
+            ordemServicoPdfCompactado: pdfData.arquivoCompactado,
+            ordemServicoPdfNomeArquivoZip: pdfData.nomeArquivoZip,
+            ordemServicoPdfMimeTypeOriginal: pdfData.mimeTypeOriginal,
+            ordemServicoPdfTamanhoOriginal: pdfData.tamanhoOriginal,
+            ordemServicoPdfTamanhoCompactado: pdfData.tamanhoCompactado,
+            ordemServicoPdf: {
+              url: pdfData.url,
+              path: pdfData.path,
+              nomeArquivo: pdfData.nomeArquivo,
+              dataAnexoTexto: pdfData.dataAnexoTexto,
+              arquivoCompactado: pdfData.arquivoCompactado,
+              nomeArquivoZip: pdfData.nomeArquivoZip,
+              mimeTypeOriginal: pdfData.mimeTypeOriginal,
+              tamanhoOriginal: pdfData.tamanhoOriginal,
+              tamanhoCompactado: pdfData.tamanhoCompactado,
+            },
+            updatedAt: serverTimestamp(),
+          });
+
+          anexoStatusFinal = "OK";
+        } catch (uploadError: unknown) {
+          console.error(uploadError);
+
+          const pendente = await salvarAnexoPendente({
+            tipo: "PDF_OS",
+            osId: ordemRef.id,
+            collectionName: "ordens_servico",
+            origem: "CALCAMENTO",
+            storageBasePath: "calcamento",
+            storageSubfolder: "os-pdf",
+            nomeArquivo: pdfOs.nomeArquivo,
+            mimeType: pdfOs.file.type || "application/pdf",
+            tamanho: pdfOs.file.size,
+            criadoPorEmail: auth.currentUser?.email?.toLowerCase() ?? null,
+            observacao: "PDF da OS salvo localmente porque o envio ao Supabase falhou após a OS já ter sido cadastrada.",
+            ultimoErro: resumirErroAnexo(uploadError),
+            arquivo: pdfOs.file,
+          });
+
+          await updateDoc(ordemRef, {
+            anexoStatus: "PENDENTE",
+            ordemServicoPdfStatus: "PENDENTE",
+            ordemServicoPdfPendenteId: pendente.id,
+            anexosPendentes: [
+              {
+                id: pendente.id,
+                tipo: "PDF_OS",
+                nomeArquivo: pdfOs.nomeArquivo,
+                criadoEmTexto: new Date().toLocaleString("pt-BR", {
+                  day: "2-digit",
+                  month: "2-digit",
+                  year: "numeric",
+                  hour: "2-digit",
+                  minute: "2-digit",
+                }),
+              },
+            ],
+            updatedAt: serverTimestamp(),
+          });
+
+          anexoStatusFinal = "PENDENTE";
+        }
+      }
 
       handleClear(false);
       setCamposAusentes([]);
       setShowMissingFieldsModal(false);
       setStatusMessage(null);
       setResultType("success");
-      setResultMessage("Ordem de serviço de Calçamento cadastrada com sucesso.");
+      setResultMessage(
+        anexoStatusFinal === "PENDENTE"
+          ? "Ordem de serviço de Calçamento cadastrada. O PDF não foi enviado agora e ficou salvo na fila local de anexos pendentes para reenvio."
+          : "Ordem de serviço de Calçamento cadastrada com sucesso."
+      );
       setShowResultModal(true);
     } catch (error: unknown) {
       console.error(error);
@@ -411,6 +628,8 @@ const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
         className="page-form page-form-mobile-wizard"
         onSubmit={(e: FormEvent<HTMLFormElement>) => e.preventDefault()}
       >
+        {formularioLiberado && (
+          <>
         <div className="mobile-form-progress" aria-label="Etapas do cadastro">
           {FORM_STEPS.map((step, index) => (
             <button
@@ -529,52 +748,95 @@ const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
           </div>
         </div>
 
-        {/* Fotos */}
+          </>
+        )}
+
+        {/* PDF da OS */}
         <div className={`page-section mobile-form-panel ${mobileStep === "anexos" ? "is-active" : ""}`}>
-          <h3>Fotos do local</h3>
+          <h3>OS em PDF</h3>
           <p className="page-section-description">
-            Anexe fotos da situação atual do calçamento (opcional). Clique em
-            uma foto para ampliar e ter opção de exclusão.
+            Anexe o PDF da ordem de serviço de Calçamento. Esse arquivo ficará vinculado ao cadastro e será aberto na Lista de OS.
           </p>
 
           <div className="page-photos-block">
             <div className="page-field photo-upload">
-              <label>Anexar fotos</label>
+              <label>Anexar OS em PDF</label>
               <input
                 type="file"
-                accept="image/*"
-                multiple
-                onChange={handleFotosChange}
+                accept="application/pdf,.pdf"
+                onChange={handlePdfChange}
               />
               <p className="photo-hint">
-                Você pode selecionar uma ou várias imagens. Somente arquivos de
-                imagem são permitidos. Campo opcional.
+                Somente arquivo PDF. O sistema tentará ler o arquivo e preencher os campos automaticamente antes de compactar em ZIP.
               </p>
             </div>
 
-            {fotos.length > 0 && (
-              <>
-                <p className="field-hint">
-                  Clique em uma foto para abrir a pré-visualização com a opção
-                  de excluir somente aquela imagem.
-                </p>
-                <div className="photo-preview-grid">
-                  {fotos.map((foto) => (
-                    <div
-                      key={foto.id}
-                      className="photo-preview-item"
-                      onClick={() => handleOpenPreview(foto)}
-                    >
-                      <img src={foto.url} alt="Foto anexada" />
-                      <span className="photo-timestamp">{foto.timestamp}</span>
-                    </div>
-                  ))}
+            {!formularioLiberado && !extractingPdf && (
+              <div className="mobile-review-card">
+                <div>
+                  <span>Comece pela OS em PDF</span>
+                  <strong>Anexe a ordem de serviço para o sistema preencher os dados automaticamente.</strong>
                 </div>
-              </>
+                <button type="button" className="btn-secondary" onClick={abrirFormularioManual}>
+                  Preencher manualmente
+                </button>
+              </div>
+            )}
+
+            {extractingPdf && (
+              <div className="mobile-review-card">
+                <div>
+                  <span>Leitura automática</span>
+                  <strong>Lendo texto do PDF...</strong>
+                </div>
+              </div>
+            )}
+
+            {pdfExtraction && !extractingPdf && (
+              <div className="mobile-review-card">
+                <div>
+                  <span>Campos encontrados no PDF</span>
+                  <strong>
+                    {pdfExtraction.camposEncontrados.length > 0
+                      ? pdfExtraction.camposEncontrados.join(", ")
+                      : "Nenhum campo identificado automaticamente"}
+                  </strong>
+                </div>
+                {pdfExtraction.dados.tipoServico && (
+                  <div>
+                    <span>Tipo sugerido pelo PDF</span>
+                    <strong>{pdfExtraction.dados.tipoServico}</strong>
+                  </div>
+                )}
+                {pdfExtraction.aviso && (
+                  <div>
+                    <span>Aviso</span>
+                    <strong>{pdfExtraction.aviso}</strong>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {pdfOs && (
+              <div className="mobile-review-card">
+                <div>
+                  <span>PDF anexado</span>
+                  <strong>{pdfOs.nomeArquivo}</strong>
+                </div>
+                <div>
+                  <span>Data do anexo</span>
+                  <strong>{pdfOs.dataAnexoTexto}</strong>
+                </div>
+                <button type="button" className="btn-secondary" onClick={handleRemovePdf}>
+                  Remover PDF
+                </button>
+              </div>
             )}
           </div>
         </div>
 
+        {formularioLiberado && (
+          <>
         <div
           className={`page-section mobile-form-panel mobile-confirmation-panel ${
             mobileStep === "confirmacao" ? "is-active" : ""
@@ -611,8 +873,8 @@ const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
               <strong>{observacoes || "Sem observações"}</strong>
             </div>
             <div>
-              <span>Fotos anexadas</span>
-              <strong>{fotos.length} foto{fotos.length === 1 ? "" : "s"}</strong>
+              <span>PDF anexado</span>
+              <strong>{pdfOs ? pdfOs.nomeArquivo : "Nenhum PDF anexado"}</strong>
             </div>
           </div>
         </div>
@@ -667,48 +929,9 @@ const BuracoNaRua: React.FC<BuracoNaRuaProps> = ({ onBack }) => {
             </button>
           )}
         </div>
+          </>
+        )}
       </form>
-
-      {/* MODAL DE PRÉ-VISUALIZAÇÃO DA FOTO */}
-      {fotoEmPreview && (
-        <div className="modal-backdrop" onClick={handleClosePreview}>
-          <div className="modal modal-photo" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h3 className="modal-title">Pré-visualização da foto</h3>
-              <button type="button" className="modal-close" onClick={handleClosePreview}>
-                ×
-              </button>
-            </div>
-
-            <div className="modal-body modal-photo-body">
-              <img
-                src={fotoEmPreview.url}
-                alt="Foto anexada"
-                style={{
-                  width: "100%",
-                  maxHeight: "70vh",
-                  objectFit: "contain",
-                  borderRadius: "0.75rem",
-                }}
-              />
-              <p className="field-hint">Anexada em {fotoEmPreview.timestamp}</p>
-            </div>
-
-            <div className="modal-footer">
-              <button type="button" className="btn-secondary" onClick={handleClosePreview}>
-                Fechar
-              </button>
-              <button
-                type="button"
-                className="btn-primary"
-                onClick={() => handleExcluirFoto(fotoEmPreview.id)}
-              >
-                Excluir esta foto
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* MODAL PARA CAMPOS NÃO PREENCHIDOS */}
       {showMissingFieldsModal && (

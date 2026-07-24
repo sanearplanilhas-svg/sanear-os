@@ -16,10 +16,31 @@ import {
   updateDoc,
   serverTimestamp,
   Timestamp,
+  arrayUnion,
 } from "firebase/firestore";
 import { db, auth } from "../lib/firebaseClient";
 import { supabase } from "../lib/supabaseClient";
+import {
+  compactFileToZip,
+  extractFirstFileObjectUrlFromZipUrl,
+  inferMimeTypeByName,
+  isZipReference,
+  ZIP_STORAGE_MIME,
+} from "../lib/storageZip";
 import { upsertSanearPause, closeSanearPause, hasOpenSanearPause } from "../lib/sla";
+import {
+  assinarAuditoriaOs,
+  registrarAuditoriaOs,
+  type AuditoriaEvento,
+} from "../lib/auditoria";
+import { salvarAnexoPendente, resumirErroAnexo } from "../lib/anexosPendentes";
+import {
+  formatOrdemStatusLabel,
+  isOrdemAguardandoSanear,
+  isOrdemFechada,
+  normalizeOrdemStatus,
+} from "../lib/status";
+import { AppPagination } from "../components/ui";
 
 // pdf-lib para gerar o PDF com os dados da OS
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
@@ -61,6 +82,8 @@ type FirestoreOS = {
   ordemServicoPdfDataAnexo?: string | null;
   ordemServicoPdfUrl?: string | null;
   ordemServicoPdfPath?: string | null;
+  ordemServicoPdfCompactado?: boolean | null;
+  ordemServicoPdfMimeTypeOriginal?: string | null;
 
   // fotos
   fotos?: any[] | null; // operador (abertura)
@@ -85,6 +108,10 @@ type NormalizedPhoto = {
   label: string;
   url: string;
   sourceIndex: number; // índice original no array salvo no Firestore
+  storagePath?: string | null;
+  nomeArquivo?: string;
+  arquivoCompactado?: boolean;
+  mimeTypeOriginal?: string | null;
 };
 
 type PhotoModalTipo = "abertura" | "execucao";
@@ -99,32 +126,33 @@ type PhotoModalState = {
 type PrintPhotoState = {
   title: string;
   url: string;
+  shouldRevoke?: boolean;
 } | null;
 
 // FRONTEND APENAS: labels amigáveis
 const tipoLabelMap: Record<string, string> = {
-  BURACO_RUA: "Calçamento",
-  CALCAMENTO: "Calçamento",
-  ASFALTO: "Asfalto",
-  HIDROJATO: "Caminhão Hidrojato",
-  CAMINHAO_HIDROJATO: "Caminhão Hidrojato",
-  ESGOTO_RETORNANDO: "Esgoto Retornando",
-  ESGOTO_ENTUPIDO: "Esgoto Entupido",
+  BURACO_RUA: "CALÇAMENTO",
+  CALCAMENTO: "CALÇAMENTO",
+  ASFALTO: "ASFALTO",
+  HIDROJATO: "CAMINHÃO HIDROJATO",
+  CAMINHAO_HIDROJATO: "CAMINHÃO HIDROJATO",
+  ESGOTO_RETORNANDO: "ESGOTO RETORNANDO",
+  ESGOTO_ENTUPIDO: "ESGOTO ENTUPIDO",
 };
 
 const tipoFiltroOptions: { value: TipoFiltroOs; label: string }[] = [
-  { value: "TODOS", label: "Todos os tipos" },
-  { value: "BURACO_RUA", label: "Calçamento" },
-  { value: "ASFALTO", label: "Asfalto" },
-  { value: "HIDROJATO", label: "Caminhão Hidrojato" },
-  { value: "ESGOTO_RETORNANDO", label: "Esgoto Retornando" },
-  { value: "ESGOTO_ENTUPIDO", label: "Esgoto Entupido" },
+  { value: "TODOS", label: "TODOS OS SERVIÇOS" },
+  { value: "BURACO_RUA", label: "CALÇAMENTO" },
+  { value: "ASFALTO", label: "ASFALTO" },
+  { value: "HIDROJATO", label: "CAMINHÃO HIDROJATO" },
+  { value: "ESGOTO_RETORNANDO", label: "ESGOTO RETORNANDO" },
+  { value: "ESGOTO_ENTUPIDO", label: "ESGOTO ENTUPIDO" },
 ];
 
 const origemLabelMap: Record<OrigemOS, string> = {
-  buraco: "Calçamento",
-  asfalto: "Asfalto",
-  hidrojato: "Caminhão Hidrojato",
+  buraco: "CALÇAMENTO",
+  asfalto: "ASFALTO",
+  hidrojato: "CAMINHÃO HIDROJATO",
 };
 
 function getOrigemLabel(origem: OrigemOS): string {
@@ -149,7 +177,11 @@ function normalizeTipoOs(os: Pick<FirestoreOS, "tipo" | "origem">): TipoFiltroOs
 
 function getTipoOsLabel(os: Pick<FirestoreOS, "tipo" | "origem">): string {
   const tipoNormalizado = normalizeTipoOs(os);
-  return tipoLabelMap[tipoNormalizado] || tipoLabelMap[os.tipo || ""] || getOrigemLabel(os.origem);
+  return (
+    tipoLabelMap[tipoNormalizado] ||
+    tipoLabelMap[String(os.tipo || "").trim().toUpperCase()] ||
+    getOrigemLabel(os.origem)
+  ).toUpperCase();
 }
 
 function getCaminhaoExecucaoLabel(os: FirestoreOS): string {
@@ -186,6 +218,11 @@ function formatDateTime(value?: Timestamp | null): string {
   } catch {
     return "-";
   }
+}
+
+function formatAuditDate(value?: Timestamp | null): string {
+  if (!value) return "Agora";
+  return formatDateTime(value);
 }
 
 // Para usar no <input type="datetime-local" />
@@ -245,11 +282,28 @@ function normalizeFotos(fotos: any): NormalizedPhoto[] {
       const label = dataTexto ? `${nomeArquivo} – ${dataTexto}` : nomeArquivo;
       const id = typeof f.id === "string" ? f.id : String(index);
 
+      const storagePath =
+        typeof f.storagePath === "string"
+          ? f.storagePath
+          : typeof f.path === "string"
+          ? f.path
+          : null;
+      const arquivoCompactado =
+        Boolean(f.arquivoCompactado || f.compactadoZip || f.zip) ||
+        isZipReference(url) ||
+        isZipReference(storagePath);
+      const mimeTypeOriginal =
+        typeof f.mimeTypeOriginal === "string" ? f.mimeTypeOriginal : null;
+
       return {
         id,
         label,
         url,
         sourceIndex: index,
+        storagePath,
+        nomeArquivo,
+        arquivoCompactado,
+        mimeTypeOriginal,
       } as NormalizedPhoto;
     })
     .filter((p): p is NormalizedPhoto => p !== null);
@@ -311,6 +365,20 @@ function resolveRawPdfPath(raw: any, pdfNested: Record<string, any> | null): str
   return raw.ordemServicoPdfPath ?? raw.osPdfPath ?? pdfNested?.path ?? null;
 }
 
+function resolveRawPdfCompactado(raw: any, pdfNested: Record<string, any> | null): boolean {
+  return Boolean(
+    raw.ordemServicoPdfCompactado ??
+      raw.osPdfCompactado ??
+      pdfNested?.arquivoCompactado ??
+      pdfNested?.compactadoZip ??
+      false
+  );
+}
+
+function resolveRawPdfMimeTypeOriginal(raw: any, pdfNested: Record<string, any> | null): string | null {
+  return raw.ordemServicoPdfMimeTypeOriginal ?? pdfNested?.mimeTypeOriginal ?? null;
+}
+
 function resolveRawPdfBase64(raw: any, pdfNested: Record<string, any> | null): string | null {
   return raw.ordemServicoPdfBase64 ?? raw.osPdfBase64 ?? pdfNested?.base64 ?? null;
 }
@@ -349,17 +417,39 @@ function hasAttachedPdf(os: FirestoreOS): boolean {
   return Boolean(os.ordemServicoPdfUrl || os.ordemServicoPdfPath || os.ordemServicoPdfBase64);
 }
 
-function resolveAttachedPdfUrl(os: FirestoreOS): { url: string; shouldRevoke: boolean } | null {
-  if (os.ordemServicoPdfUrl) {
-    return { url: os.ordemServicoPdfUrl, shouldRevoke: false };
+async function resolveAttachedPdfUrl(os: FirestoreOS): Promise<{ url: string; shouldRevoke: boolean } | null> {
+  const rawUrl = os.ordemServicoPdfUrl || null;
+  const rawPath = os.ordemServicoPdfPath || null;
+  const isZipped = Boolean(os.ordemServicoPdfCompactado) || isZipReference(rawUrl) || isZipReference(rawPath);
+
+  if (rawUrl) {
+    if (isZipped) {
+      const extracted = await extractFirstFileObjectUrlFromZipUrl(
+        rawUrl,
+        os.ordemServicoPdfMimeTypeOriginal || "application/pdf"
+      );
+      return { url: extracted.url, shouldRevoke: true };
+    }
+
+    return { url: rawUrl, shouldRevoke: false };
   }
 
-  if (os.ordemServicoPdfPath) {
+  if (rawPath) {
     const { data } = supabase.storage
       .from(STORAGE_BUCKET)
-      .getPublicUrl(os.ordemServicoPdfPath);
+      .getPublicUrl(rawPath);
 
-    if (data.publicUrl) return { url: data.publicUrl, shouldRevoke: false };
+    if (data.publicUrl) {
+      if (isZipped) {
+        const extracted = await extractFirstFileObjectUrlFromZipUrl(
+          data.publicUrl,
+          os.ordemServicoPdfMimeTypeOriginal || "application/pdf"
+        );
+        return { url: extracted.url, shouldRevoke: true };
+      }
+
+      return { url: data.publicUrl, shouldRevoke: false };
+    }
   }
 
   if (os.ordemServicoPdfBase64) {
@@ -367,6 +457,68 @@ function resolveAttachedPdfUrl(os: FirestoreOS): { url: string; shouldRevoke: bo
   }
 
   return null;
+}
+
+async function resolvePhotoDisplayUrl(photo: NormalizedPhoto): Promise<{ url: string; shouldRevoke: boolean }> {
+  const zipped = Boolean(photo.arquivoCompactado) || isZipReference(photo.url) || isZipReference(photo.storagePath);
+
+  if (!zipped) {
+    return { url: photo.url, shouldRevoke: false };
+  }
+
+  const extracted = await extractFirstFileObjectUrlFromZipUrl(
+    photo.url,
+    photo.mimeTypeOriginal || inferMimeTypeByName(photo.nomeArquivo || "foto.jpg", "image/jpeg")
+  );
+
+  return { url: extracted.url, shouldRevoke: true };
+}
+
+type ZipAwarePhotoProps = {
+  photo: NormalizedPhoto;
+  style?: React.CSSProperties;
+};
+
+function ZipAwarePhoto({ photo, style }: ZipAwarePhotoProps) {
+  const [src, setSrc] = useState(photo.url);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    let objectUrl: string | null = null;
+
+    setSrc(photo.url);
+    setError(null);
+
+    if (!photo.arquivoCompactado && !isZipReference(photo.url) && !isZipReference(photo.storagePath)) {
+      return () => undefined;
+    }
+
+    resolvePhotoDisplayUrl(photo)
+      .then((result) => {
+        if (!active) {
+          if (result.shouldRevoke) URL.revokeObjectURL(result.url);
+          return;
+        }
+        objectUrl = result.shouldRevoke ? result.url : null;
+        setSrc(result.url);
+      })
+      .catch((err) => {
+        console.error(err);
+        if (active) setError("Não foi possível abrir a foto compactada.");
+      });
+
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [photo]);
+
+  if (error) {
+    return <div className="field-hint">{error}</div>;
+  }
+
+  return <img src={src} alt={photo.label} style={style} />;
 }
 
 /**
@@ -486,6 +638,8 @@ const ListaOrdensServico: React.FC = () => {
 
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [statusType, setStatusType] = useState<StatusType>("info");
+  const [currentPage, setCurrentPage] = useState<number>(1);
+  const PAGE_SIZE = 20;
 
   const [alertModal, setAlertModal] = useState<
     { title: string; message: string } | null
@@ -526,6 +680,7 @@ const ListaOrdensServico: React.FC = () => {
   // estado de edição dentro do modal de detalhes
   const [isEditingDetails, setIsEditingDetails] = useState(false);
   const [savingDetails, setSavingDetails] = useState(false);
+  const [auditoriaEventos, setAuditoriaEventos] = useState<AuditoriaEvento[]>([]);
 
   useEffect(() => {
     const user = auth.currentUser;
@@ -535,6 +690,16 @@ const ListaOrdensServico: React.FC = () => {
       localStorage.getItem("sanear-role") ?? localStorage.getItem("userRole");
     setCurrentUserRole(storedRole);
   }, []);
+
+  useEffect(() => {
+    if (!statusMessage) return;
+
+    const timer = window.setTimeout(() => {
+      setStatusMessage(null);
+    }, 3000);
+
+    return () => window.clearTimeout(timer);
+  }, [statusMessage]);
 
   useEffect(() => {
     // Calçamento (coleção ordens_servico)
@@ -576,6 +741,8 @@ const ListaOrdensServico: React.FC = () => {
             ordemServicoPdfDataAnexo: resolveRawPdfDataAnexo(raw, pdfNested),
             ordemServicoPdfUrl: resolveRawPdfUrl(raw, pdfNested),
             ordemServicoPdfPath: resolveRawPdfPath(raw, pdfNested),
+            ordemServicoPdfCompactado: resolveRawPdfCompactado(raw, pdfNested),
+            ordemServicoPdfMimeTypeOriginal: resolveRawPdfMimeTypeOriginal(raw, pdfNested),
           };
         });
         setOrdensBuraco(data);
@@ -629,6 +796,8 @@ const ListaOrdensServico: React.FC = () => {
             ordemServicoPdfDataAnexo: resolveRawPdfDataAnexo(raw, pdfNested),
             ordemServicoPdfUrl: resolveRawPdfUrl(raw, pdfNested),
             ordemServicoPdfPath: resolveRawPdfPath(raw, pdfNested),
+            ordemServicoPdfCompactado: resolveRawPdfCompactado(raw, pdfNested),
+            ordemServicoPdfMimeTypeOriginal: resolveRawPdfMimeTypeOriginal(raw, pdfNested),
           };
         });
         setOrdensAsfalto(data);
@@ -682,6 +851,8 @@ const ListaOrdensServico: React.FC = () => {
             ordemServicoPdfDataAnexo: resolveRawPdfDataAnexo(raw, pdfNested),
             ordemServicoPdfUrl: resolveRawPdfUrl(raw, pdfNested),
             ordemServicoPdfPath: resolveRawPdfPath(raw, pdfNested),
+            ordemServicoPdfCompactado: resolveRawPdfCompactado(raw, pdfNested),
+            ordemServicoPdfMimeTypeOriginal: resolveRawPdfMimeTypeOriginal(raw, pdfNested),
           };
         });
         setOrdensHidrojato(data);
@@ -751,6 +922,21 @@ const ListaOrdensServico: React.FC = () => {
     if (!fresh) return;
     setDetailsModalOs(fresh);
   }, [ordensByKey, detailsModalOs, isEditingDetails]);
+  // Histórico operacional da OS exibido dentro do modal de detalhes.
+  useEffect(() => {
+    if (!detailsModalOs) {
+      setAuditoriaEventos([]);
+      return;
+    }
+
+    return assinarAuditoriaOs(
+      detailsModalOs.origem,
+      detailsModalOs.id,
+      setAuditoriaEventos,
+      () => setAuditoriaEventos([])
+    );
+  }, [detailsModalOs?.origem, detailsModalOs?.id]);
+
 
   // regra de permissão: criador OU admin OU diretor
   const canEditOs = (os: FirestoreOS): boolean => {
@@ -769,16 +955,7 @@ const ListaOrdensServico: React.FC = () => {
   };
 
   function isOsFechada(os: FirestoreOS): boolean {
-    const status = String(os.status ?? "ABERTA").trim().toUpperCase();
-    if (!status || status === "ABERTA" || status === "ABERTO") return false;
-
-    if (status.startsWith("CONCLU")) return true;
-    if (status.startsWith("CANCEL")) return true;
-    if (status.startsWith("FECH")) return true;
-    if (status.startsWith("ENCERR")) return true;
-
-    if (os.dataExecucao) return true;
-    return false;
+    return isOrdemFechada(os.status) || Boolean(os.dataExecucao);
   }
 
   function isSameLocalDate(
@@ -896,8 +1073,30 @@ const ListaOrdensServico: React.FC = () => {
     ordenacaoDirecao,
   ]);
 
+  const totalPages = useMemo(() => {
+    return Math.max(1, Math.ceil(filtradas.length / PAGE_SIZE));
+  }, [filtradas.length, PAGE_SIZE]);
+
+  const paginatedOrdens = useMemo(() => {
+    const start = (currentPage - 1) * PAGE_SIZE;
+    return filtradas.slice(start, start + PAGE_SIZE);
+  }, [filtradas, currentPage, PAGE_SIZE]);
+
+  const paginationStart = filtradas.length === 0 ? 0 : (currentPage - 1) * PAGE_SIZE + 1;
+  const paginationEnd = Math.min(currentPage * PAGE_SIZE, filtradas.length);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [busca, filtroTipo, filtroDataCriacao, filtroStatus, ordenacaoCampo, ordenacaoDirecao]);
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
+
   const filtroTipoLabel = useMemo(() => {
-    return tipoFiltroOptions.find((option) => option.value === filtroTipo)?.label ?? "Todos os tipos";
+    return tipoFiltroOptions.find((option) => option.value === filtroTipo)?.label ?? "TODOS OS SERVIÇOS";
   }, [filtroTipo]);
 
   const filtroStatusLabel = useMemo(() => {
@@ -1134,7 +1333,7 @@ const ListaOrdensServico: React.FC = () => {
     setPdfModalLoading(true);
 
     try {
-      const attachedPdf = resolveAttachedPdfUrl(os);
+      const attachedPdf = await resolveAttachedPdfUrl(os);
 
       if (attachedPdf) {
         setPdfModalUrl(attachedPdf.url);
@@ -1166,21 +1365,29 @@ const ListaOrdensServico: React.FC = () => {
     setPdfModalLoading(false);
   }
 
-  function handleOpenAttachedPdfFromDetails(os: FirestoreOS) {
-    const attachedPdf = resolveAttachedPdfUrl(os);
+  async function handleOpenAttachedPdfFromDetails(os: FirestoreOS) {
+    try {
+      const attachedPdf = await resolveAttachedPdfUrl(os);
 
-    if (!attachedPdf) {
+      if (!attachedPdf) {
+        openAlertModal(
+          "PDF não encontrado",
+          "Esta OS não possui PDF anexado na criação."
+        );
+        return;
+      }
+
+      window.open(attachedPdf.url, "_blank", "noopener,noreferrer");
+
+      if (attachedPdf.shouldRevoke) {
+        window.setTimeout(() => URL.revokeObjectURL(attachedPdf.url), 60000);
+      }
+    } catch (error) {
+      console.error(error);
       openAlertModal(
-        "PDF não encontrado",
-        "Esta OS não possui PDF anexado na criação."
+        "PDF compactado",
+        "Não foi possível abrir o PDF compactado desta OS."
       );
-      return;
-    }
-
-    window.open(attachedPdf.url, "_blank", "noopener,noreferrer");
-
-    if (attachedPdf.shouldRevoke) {
-      window.setTimeout(() => URL.revokeObjectURL(attachedPdf.url), 60000);
     }
   }
 
@@ -1192,6 +1399,14 @@ const ListaOrdensServico: React.FC = () => {
   
 async function handleMarcarAguardandoSanear() {
   if (!detailsModalOs) return;
+
+  if (isOsFechada(detailsModalOs)) {
+    openAlertModal(
+      "OS fechada",
+      "Esta OS já está fechada. Reabra a OS antes de marcar como Aguardando SANEAR."
+    );
+    return;
+  }
 
   const descricao = aguardandoDescricao.trim();
   if (descricao.length < 3) {
@@ -1221,6 +1436,18 @@ async function handleMarcarAguardandoSanear() {
       statusAntesAguardandoSanear: statusAntes,
       slaPausas: pausasAtualizadas,
       updatedAt: serverTimestamp(),
+    });
+
+    void registrarAuditoriaOs({
+      osId: detailsModalOs.id,
+      origem: detailsModalOs.origem,
+      collectionName,
+      acao: "AGUARDANDO_SANEAR",
+      titulo: "OS marcada como Aguardando SANEAR",
+      descricao: descricao || "Serviço pausado aguardando ação interna da SANEAR.",
+      statusAntes,
+      statusDepois: "AGUARDANDO_SANEAR",
+      detalhes: { motivo: aguardandoMotivo },
     });
 
     setDetailsModalOs((prev) =>
@@ -1266,6 +1493,17 @@ async function handleRetomarSanear() {
       updatedAt: serverTimestamp(),
     });
 
+    void registrarAuditoriaOs({
+      osId: detailsModalOs.id,
+      origem: detailsModalOs.origem,
+      collectionName,
+      acao: "RETOMADA_SANEAR",
+      titulo: "OS retomada pela SANEAR",
+      descricao: "A pausa Aguardando SANEAR foi encerrada e a OS voltou ao fluxo normal.",
+      statusAntes: "AGUARDANDO_SANEAR",
+      statusDepois: novoStatus,
+    });
+
     setDetailsModalOs((prev) =>
       prev
         ? { ...prev, status: novoStatus, statusAntesAguardandoSanear: null, slaPausas: pausasFechadas }
@@ -1277,6 +1515,119 @@ async function handleRetomarSanear() {
   } catch (e) {
     console.error(e);
     setStatusMessage("Não foi possível retomar a OS.");
+    setStatusType("error");
+  } finally {
+    setSavingDetails(false);
+  }
+}
+
+async function handleReabrirOs(os: FirestoreOS) {
+  const motivoInformado = window.prompt(
+    "Informe o motivo da reabertura da OS:",
+    "Correção ou nova finalização necessária."
+  );
+
+  if (motivoInformado === null) return;
+
+  const motivoReabertura = motivoInformado.trim();
+  if (!motivoReabertura) {
+    setStatusMessage("Informe o motivo da reabertura antes de continuar.");
+    setStatusType("error");
+    return;
+  }
+
+  const confirmReopen = window.confirm(
+    "Deseja reabrir esta OS? A execução atual será preservada no histórico e a OS ficará disponível para nova finalização."
+  );
+
+  if (!confirmReopen) return;
+
+  try {
+    setSavingDetails(true);
+
+    const collectionName = getCollectionName(os.origem);
+    const pausasFechadas = closeSanearPause(os.slaPausas, serverTimestamp());
+    const fotosExecucaoAtuais = Array.isArray(os.fotosExecucao) ? os.fotosExecucao : [];
+    const temExecucaoAnterior =
+      !!os.dataExecucao ||
+      !!os.finalizadoPorArea ||
+      !!os.finalizadoPorEmail ||
+      fotosExecucaoAtuais.length > 0 ||
+      !!os.tipoCaminhaoExecucao ||
+      !!os.tipoCaminhaoExecucaoLabel;
+
+    const historicoExecucao = {
+      tipo: "REABERTURA_EXECUCAO",
+      statusAnterior: os.status ?? null,
+      dataExecucao: os.dataExecucao ?? null,
+      finalizadoPorArea: os.finalizadoPorArea ?? null,
+      finalizadoPorEmail: os.finalizadoPorEmail ?? null,
+      tipoCaminhaoExecucao: os.tipoCaminhaoExecucao ?? null,
+      tipoCaminhaoExecucaoLabel: os.tipoCaminhaoExecucaoLabel ?? null,
+      fotosExecucao: fotosExecucaoAtuais,
+      motivoReabertura,
+      reabertaEm: Timestamp.now(),
+      reabertaPorEmail: currentUserEmail ?? null,
+      reabertaPorUid: auth.currentUser?.uid ?? null,
+    };
+
+    await updateDoc(doc(db, collectionName, os.id), {
+      status: "ABERTA",
+      dataExecucao: null,
+      finalizadoPorArea: null,
+      finalizadoPorEmail: null,
+      tipoCaminhaoExecucao: null,
+      tipoCaminhaoExecucaoLabel: null,
+      fotosExecucao: [],
+      statusAntesAguardandoSanear: null,
+      slaPausas: pausasFechadas,
+      reabertaEm: serverTimestamp(),
+      reabertaPorEmail: currentUserEmail ?? null,
+      reabertaPorUid: auth.currentUser?.uid ?? null,
+      motivoUltimaReabertura: motivoReabertura,
+      ...(temExecucaoAnterior ? { historicoExecucoes: arrayUnion(historicoExecucao) } : {}),
+      updatedAt: serverTimestamp(),
+    });
+
+    void registrarAuditoriaOs({
+      osId: os.id,
+      origem: os.origem,
+      collectionName,
+      acao: "REABERTURA_OS",
+      titulo: "OS reaberta",
+      descricao: motivoReabertura,
+      statusAntes: os.status ?? null,
+      statusDepois: "ABERTA",
+      detalhes: { execucaoAnteriorPreservada: temExecucaoAnterior },
+    });
+
+    setDetailsModalOs((prev) =>
+      prev
+        ? {
+            ...prev,
+            status: "ABERTA",
+            dataExecucao: null,
+            finalizadoPorArea: null,
+            finalizadoPorEmail: null,
+            tipoCaminhaoExecucao: null,
+            tipoCaminhaoExecucaoLabel: null,
+            fotosExecucao: [],
+            statusAntesAguardandoSanear: null,
+            slaPausas: pausasFechadas,
+          }
+        : prev
+    );
+
+    setIsEditingDetails(false);
+    setStatusMessage(
+      temExecucaoAnterior
+        ? "OS reaberta com sucesso. A execução anterior foi preservada no histórico."
+        : "OS reaberta com sucesso."
+    );
+    setStatusType("success");
+  } catch (error) {
+    console.error(error);
+    setStatusMessage("Não foi possível reabrir a OS. Tente novamente.");
     setStatusType("error");
   } finally {
     setSavingDetails(false);
@@ -1307,6 +1658,18 @@ async function handleDeleteOs(os: FirestoreOS) {
         console.error("Falha ao remover arquivos do Storage:", e);
       }
 
+      void registrarAuditoriaOs({
+        osId: os.id,
+        origem: os.origem,
+        collectionName,
+        acao: "EXCLUSAO_OS",
+        titulo: "OS excluída",
+        descricao: `OS removida da coleção ${collectionName}. Arquivos removidos do Storage: ${removedFiles}.`,
+        statusAntes: os.status ?? null,
+        statusDepois: "EXCLUIDA",
+        detalhes: { storageOk, removedFiles },
+      });
+
       await deleteDoc(doc(db, collectionName, os.id));
       setDetailsModalOs(null);
 
@@ -1336,8 +1699,8 @@ async function handleDeleteOs(os: FirestoreOS) {
   }
 
   function normalizeStatus(value: string | null | undefined): string {
-  return String(value ?? "").trim().toUpperCase();
-}
+    return normalizeOrdemStatus(value);
+  }
 
 async function handleSaveDetails() {
     if (!detailsModalOs) return;
@@ -1362,6 +1725,14 @@ async function handleSaveDetails() {
       return;
     }
 
+    if (isOsFechada(detailsModalOs)) {
+      openAlertModal(
+        "OS fechada",
+        "Esta OS está fechada. Para alterar dados, primeiro reabra a OS."
+      );
+      return;
+    }
+
     try {
       setSavingDetails(true);
 
@@ -1376,13 +1747,29 @@ async function handleSaveDetails() {
         numero: detailsModalOs.numero || null,
         pontoReferencia: detailsModalOs.pontoReferencia || null,
         observacoes: detailsModalOs.observacoes || null,
-        status: detailsModalOs.status || null,
+        status: normalizeStatus(detailsModalOs.status),
 
         ...(isAdmRole(currentUserRole)
           ? { dataExecucao: detailsModalOs.dataExecucao ?? null }
           : {}),
 
         updatedAt: serverTimestamp(),
+      });
+
+      void registrarAuditoriaOs({
+        osId: detailsModalOs.id,
+        origem: detailsModalOs.origem,
+        collectionName,
+        acao: "EDICAO_OS",
+        titulo: "Dados da OS editados",
+        descricao: "Alteração manual realizada pela Lista de OS.",
+        statusDepois: normalizeStatus(detailsModalOs.status),
+        detalhes: {
+          protocolo: detailsModalOs.protocolo || null,
+          ordemServico: detailsModalOs.ordemServico || null,
+          bairro: detailsModalOs.bairro || null,
+          rua: detailsModalOs.rua || null,
+        },
       });
 
       setStatusMessage("Ordem de serviço atualizada com sucesso.");
@@ -1409,22 +1796,19 @@ async function handleSaveDetails() {
     return normalizeFotos(detailsModalOs.fotosExecucao);
   }, [detailsModalOs]);
 
+  const detailsModalFechada = detailsModalOs ? isOsFechada(detailsModalOs) : false;
   const canEditCurrent =
     detailsModalOs && canEditOs(detailsModalOs) ? true : false;
-  const readOnlyEditableFields = !isEditingDetails || !canEditCurrent;
+  const canEditCurrentFields = canEditCurrent && !detailsModalFechada;
+  const readOnlyEditableFields = !isEditingDetails || !canEditCurrentFields;
 
-  function openPhotoModalForOs(os: FirestoreOS, preferido?: PhotoModalTipo) {
-    const temAbertura = normalizeFotos(os.fotos).length > 0;
-    const temExecucao = normalizeFotos(os.fotosExecucao).length > 0;
-
-    let tipo: PhotoModalTipo = "abertura";
-    if (preferido) tipo = preferido;
-    else if (!temAbertura && temExecucao) tipo = "execucao";
-
+  function openPhotoModalForOs(os: FirestoreOS, _preferido?: PhotoModalTipo) {
+    // A Lista de OS deve mostrar somente as fotos de execução/finalização da terceirizada.
+    // Fotos de abertura/operador não fazem mais parte deste fluxo visual.
     setPhotoModal({
       osId: os.id,
       origem: os.origem,
-      tipo,
+      tipo: "execucao",
       currentIndex: 0,
     });
   }
@@ -1447,10 +1831,13 @@ async function handleSaveDetails() {
     return getOsBy(state.origem, state.osId);
   }
 
+  void fotosAberturaDetalhes;
+  void openPhotoModalFromRow;
+
   function getFotosFromModalState(state: PhotoModalState | null): NormalizedPhoto[] {
     const os = getOsFromPhotoModal(state);
     if (!os || !state) return [];
-    return normalizeFotos(state.tipo === "abertura" ? os.fotos : os.fotosExecucao);
+    return normalizeFotos(os.fotosExecucao);
   }
 
   function goToNextPhoto() {
@@ -1508,6 +1895,16 @@ async function handleSaveDetails() {
       const updatedArray = originalArray.filter(
         (_f, idx) => idx !== fotoAtual.sourceIndex
       );
+
+      if (fotoAtual.storagePath) {
+        const { error: removeError } = await supabase.storage
+          .from(STORAGE_BUCKET)
+          .remove([fotoAtual.storagePath]);
+
+        if (removeError) {
+          console.warn("Não foi possível remover o arquivo da foto no Supabase:", removeError);
+        }
+      }
 
       await updateDoc(doc(db, collectionName, os.id), {
         [tipo === "abertura" ? "fotos" : "fotosExecucao"]: updatedArray,
@@ -1569,7 +1966,26 @@ async function handleSaveDetails() {
       return;
     }
 
-    const { tipo } = photoModal;
+    const fotosAtuais = normalizeFotos(os.fotosExecucao).length;
+    const limiteFotos = 2;
+
+    if (isOsFechada(os)) {
+      e.target.value = "";
+      openAlertModal(
+        "OS fechada",
+        "Esta OS está fechada. Reabra a OS antes de adicionar novas fotos."
+      );
+      return;
+    }
+
+    if (fotosAtuais >= limiteFotos) {
+      e.target.value = "";
+      openAlertModal(
+        "Limite de fotos",
+        "Esta OS já possui 2 fotos da terceirizada. Para adicionar outra, exclua uma foto primeiro."
+      );
+      return;
+    }
 
     const validFiles = Array.from(files).filter((file) => {
       if (file.type && file.type.startsWith("image/")) return true;
@@ -1585,9 +2001,26 @@ async function handleSaveDetails() {
       return;
     }
 
+    const vagasDisponiveis = Math.max(0, limiteFotos - fotosAtuais);
+    const filesParaEnviar = validFiles.slice(0, vagasDisponiveis);
+
+    if (filesParaEnviar.length === 0) {
+      setStatusMessage("Limite de 2 fotos da terceirizada já atingido.");
+      setStatusType("info");
+      e.target.value = "";
+      return;
+    }
+
+    if (validFiles.length > filesParaEnviar.length) {
+      setStatusMessage(
+        `Limite de 2 fotos por OS. Apenas ${filesParaEnviar.length} foto(s) será(ão) adicionada(s).`
+      );
+      setStatusType("info");
+    }
+
     try {
       const basePath = getStorageBasePath(os.origem);
-      const subfolder = tipo === "abertura" ? "fotos" : "fotos-execucao";
+      const subfolder = "fotos-execucao";
 
       const agora = new Date();
       const dataAnexoTexto = agora.toLocaleString("pt-BR", {
@@ -1600,39 +2033,54 @@ async function handleSaveDetails() {
 
       const novosItens: any[] = [];
 
-      for (const file of validFiles) {
+      for (const file of filesParaEnviar) {
         const originalName = file.name || "foto.jpg";
         const safeName = sanitizeForStoragePath(originalName);
 
         const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        const path = `${basePath}/${os.id}/${subfolder}/${id}-${safeName}`;
+        const compactado = await compactFileToZip(file);
+        const path = `${basePath}/${os.id}/${subfolder}/${id}-${compactado.zipFileName || `${safeName}.zip`}`;
 
         const { error: uploadError } = await supabase.storage
           .from(STORAGE_BUCKET)
-          .upload(path, file, { upsert: true });
+          .upload(path, compactado.blob, {
+            upsert: false,
+            contentType: ZIP_STORAGE_MIME,
+          });
 
         if (uploadError) {
           console.error(uploadError);
           throw new Error(
-            `Erro ao enviar foto "${originalName}" para o armazenamento.`
+            `Erro ao enviar foto "${originalName}" compactada em ZIP para o armazenamento.`
           );
         }
 
         const { data } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(path);
         const url = data.publicUrl;
 
-        novosItens.push({ id, nomeArquivo: originalName, dataAnexoTexto, url });
+        novosItens.push({
+          id,
+          nomeArquivo: originalName,
+          dataAnexoTexto,
+          url,
+          path,
+          storagePath: path,
+          arquivoCompactado: true,
+          nomeArquivoZip: compactado.zipFileName,
+          mimeTypeOriginal: compactado.originalMimeType,
+          tamanhoOriginal: compactado.originalSize,
+          tamanhoCompactado: compactado.zipSize,
+        });
       }
 
       const collectionName =
         getCollectionName(os.origem);
 
-      const originalArray: any[] =
-        (tipo === "abertura" ? os.fotos : os.fotosExecucao) || [];
+      const originalArray: any[] = os.fotosExecucao || [];
       const updatedArray = [...originalArray, ...novosItens];
 
       await updateDoc(doc(db, collectionName, os.id), {
-        [tipo === "abertura" ? "fotos" : "fotosExecucao"]: updatedArray,
+        fotosExecucao: updatedArray,
         updatedAt: serverTimestamp(),
       });
 
@@ -1643,17 +2091,46 @@ async function handleSaveDetails() {
       setPhotoModal((prev) =>
         prev ? { ...prev, currentIndex: updatedArray.length - 1 } : prev
       );
-    } catch (error) {
+    } catch (error: unknown) {
       console.error(error);
-      setStatusMessage("Não foi possível adicionar as fotos. Tente novamente mais tarde.");
-      setStatusType("error");
+
+      try {
+        const collectionName = getCollectionName(os.origem);
+        const basePath = getStorageBasePath(os.origem);
+        const erroResumo = resumirErroAnexo(error);
+
+        await Promise.all(
+          filesParaEnviar.map((file) =>
+            salvarAnexoPendente({
+              tipo: "FOTO_EXECUCAO",
+              osId: os.id,
+              collectionName,
+              origem: os.origem.toLocaleUpperCase("pt-BR"),
+              storageBasePath: basePath,
+              storageSubfolder: "fotos-execucao",
+              nomeArquivo: file.name || "foto.jpg",
+              mimeType: file.type || "image/jpeg",
+              tamanho: file.size,
+              criadoPorEmail: auth.currentUser?.email?.toLowerCase() ?? null,
+              observacao: "Foto da terceirizada salva localmente porque o envio ao Supabase falhou.",
+              ultimoErro: erroResumo,
+              arquivo: file,
+            })
+          )
+        );
+      } catch (queueError) {
+        console.error("Erro ao salvar fotos na fila local", queueError);
+      }
+
+      setStatusMessage("Não foi possível enviar agora. A(s) foto(s) ficaram na fila local de anexos pendentes.");
+      setStatusType("info");
     } finally {
       e.target.value = "";
     }
   }
 
   // IMPRIMIR FOTO (SEM POPUP)
-  function handlePrintCurrentPhoto() {
+  async function handlePrintCurrentPhoto() {
     if (!photoModal) return;
 
     const os = getOsFromPhotoModal(photoModal);
@@ -1676,7 +2153,20 @@ async function handleSaveDetails() {
       foto.label || "Foto"
     }`;
 
-    setPrintPhoto({ title: titulo, url: foto.url });
+    try {
+      const resolved = await resolvePhotoDisplayUrl(foto);
+      setPrintPhoto({
+        title: titulo,
+        url: resolved.url,
+        shouldRevoke: resolved.shouldRevoke,
+      });
+    } catch (error) {
+      console.error(error);
+      openAlertModal(
+        "Foto compactada",
+        "Não foi possível abrir a foto compactada para impressão."
+      );
+    }
   }
 
   useEffect(() => {
@@ -1686,6 +2176,7 @@ async function handleSaveDetails() {
 
     const onAfterPrint = () => {
       document.body.classList.remove("print-photo-active");
+      if (printPhoto.shouldRevoke) URL.revokeObjectURL(printPhoto.url);
       setPrintPhoto(null);
     };
 
@@ -1693,6 +2184,7 @@ async function handleSaveDetails() {
 
     const fallback = window.setTimeout(() => {
       document.body.classList.remove("print-photo-active");
+      if (printPhoto.shouldRevoke) URL.revokeObjectURL(printPhoto.url);
       setPrintPhoto(null);
     }, 15000);
 
@@ -1702,6 +2194,7 @@ async function handleSaveDetails() {
           window.print();
         } catch {
           document.body.classList.remove("print-photo-active");
+          if (printPhoto.shouldRevoke) URL.revokeObjectURL(printPhoto.url);
           setPrintPhoto(null);
         }
       }, 50);
@@ -1736,24 +2229,16 @@ async function handleSaveDetails() {
   };
 
   function getMobileStatusLabel(os: FirestoreOS): string {
-    const status = normalizeStatus(os.status);
-
-    if (status === "AGUARDANDO_SANEAR") return "Aguardando SANEAR";
-    if (status.startsWith("CONCLU")) return "Finalizada";
-    if (status.startsWith("CANCEL")) return "Cancelada";
-    if (status.startsWith("FECH") || status.startsWith("ENCERR")) return "Fechada";
-    if (os.dataExecucao) return "Executada";
-    return "Aberta";
+    if (os.dataExecucao && !isOrdemFechada(os.status)) return "Executada";
+    return formatOrdemStatusLabel(os.status);
   }
 
   function getMobileStatusClass(os: FirestoreOS): string {
     const status = normalizeStatus(os.status);
 
-    if (status === "AGUARDANDO_SANEAR") return "is-waiting";
-    if (status.startsWith("CONCLU") || status.startsWith("FECH") || status.startsWith("ENCERR") || os.dataExecucao) {
-      return "is-done";
-    }
-    if (status.startsWith("CANCEL")) return "is-canceled";
+    if (isOrdemAguardandoSanear(status)) return "is-waiting";
+    if (status === "CONCLUIDA" || os.dataExecucao) return "is-done";
+    if (status === "CANCELADA") return "is-canceled";
     return "is-open";
   }
 
@@ -1958,7 +2443,7 @@ async function handleSaveDetails() {
           }}
         >
           <div className="page-field" style={{ minWidth: 230 }}>
-            <label>Tipo de serviço</label>
+            <label>Serviço</label>
             <select
               value={filtroTipo}
               onChange={(e) => setFiltroTipo(e.target.value as TipoFiltroOs)}
@@ -2079,7 +2564,7 @@ async function handleSaveDetails() {
                 <strong>{filtradas.length} de {ordens.length} OS</strong>
               </div>
               <div>
-                <span>Tipo</span>
+                <span>Serviço</span>
                 <strong>{filtroTipoLabel}</strong>
               </div>
               <div>
@@ -2094,7 +2579,7 @@ async function handleSaveDetails() {
 
             <div className="os-mobile-filter-content">
               <section className="os-mobile-filter-section">
-                <div className="os-mobile-filter-section-title">Tipo de serviço</div>
+                <div className="os-mobile-filter-section-title">Serviço</div>
                 <div className="os-mobile-chip-grid">
                   {tipoFiltroOptions.map((option) => (
                     <button
@@ -2212,26 +2697,34 @@ async function handleSaveDetails() {
 
         {!loading && filtradas.length > 0 && (
           <>
+            <AppPagination
+              currentPage={currentPage}
+              totalPages={totalPages}
+              totalItems={filtradas.length}
+              pageStart={paginationStart}
+              pageEnd={paginationEnd}
+              onPageChange={setCurrentPage}
+              variant="top"
+              label="OS"
+            />
+
             <div className="os-table-wrapper os-table-wrapper-desktop" style={{ overflow: "auto", maxHeight: "70vh" }}>
               <table className="os-table">
                 <thead style={{ position: "sticky", top: 0, zIndex: 9, background: "#fff" }}>
                   <tr>
                     <th style={stickyHeaderCellStyle}>Nº OS</th>
-                    <th style={stickyHeaderCellStyle}>Tipo</th>
+                    <th style={stickyHeaderCellStyle}>Serviço</th>
                     <th style={stickyHeaderCellStyle}>Bairro</th>
                     <th style={stickyHeaderCellStyle}>Rua / Avenida</th>
                     <th style={stickyHeaderCellStyle}>Dados da OS</th>
                     <th style={stickyHeaderCellStyle}>Data de criação</th>
                     <th style={stickyHeaderCellStyle}>Data de execução</th>
-                    <th style={stickyHeaderCellStyle}>Ações</th>
+                    <th style={stickyHeaderCellStyle}>Fotos</th>
                   </tr>
                 </thead>
 
                 <tbody>
-                  {filtradas.map((os) => {
-                    const qtdAbertura = normalizeFotos(os.fotos).length;
-                    const qtdExecucao = normalizeFotos(os.fotosExecucao).length;
-                    const totalFotos = qtdAbertura + qtdExecucao;
+                  {paginatedOrdens.map((os) => {
                     const osKey = `${os.origem}:${os.id}`;
                     const isBlink = highlightRowKey === osKey;
 
@@ -2270,38 +2763,18 @@ async function handleSaveDetails() {
                         </td>
                         <td>
                           <div className="os-row-actions" style={{ gap: "0.5rem" }}>
-                            <button
-                              type="button"
-                              className="btn-secondary"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                openPhotoModalFromRow(os);
-                              }}
-                            >
-                              Ver fotos{totalFotos > 0 ? ` (${totalFotos})` : ""}
-                            </button>
-
-                            <button
-                              type="button"
-                              className="btn-secondary"
-                              style={!canEditOs(os) ? { opacity: 0.65 } : undefined}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                setDetailsModalOs(os);
-
-                                if (canEditOs(os)) {
-                                  setIsEditingDetails(true);
-                                } else {
-                                  setIsEditingDetails(false);
-                                  openAlertModal(
-                                    "Sem permissão",
-                                    "Você não tem permissão para editar esta OS."
-                                  );
-                                }
-                              }}
-                            >
-                              Editar
-                            </button>
+                            {normalizeFotos(os.fotosExecucao).length > 0 && (
+                              <button
+                                type="button"
+                                className="btn-secondary"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  openPhotoModalForOs(os, "execucao");
+                                }}
+                              >
+                                Fotos ({normalizeFotos(os.fotosExecucao).length})
+                              </button>
+                            )}
                           </div>
                         </td>
                       </tr>
@@ -2312,14 +2785,9 @@ async function handleSaveDetails() {
             </div>
 
             <div className="os-mobile-list" aria-label="Lista de ordens de serviço em cartões">
-              {filtradas.map((os) => {
-                const qtdAbertura = normalizeFotos(os.fotos).length;
-                const qtdExecucao = normalizeFotos(os.fotosExecucao).length;
-                const totalFotos = qtdAbertura + qtdExecucao;
+              {paginatedOrdens.map((os) => {
                 const osKey = `${os.origem}:${os.id}`;
                 const isBlink = highlightRowKey === osKey;
-                const canEdit = canEditOs(os);
-
                 return (
                   <article
                     key={`mobile-${osKey}`}
@@ -2389,42 +2857,32 @@ async function handleSaveDetails() {
                         Abrir PDF
                       </button>
 
-                      <button
-                        type="button"
-                        className="btn-secondary"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          openPhotoModalFromRow(os);
-                        }}
-                      >
-                        Fotos{totalFotos > 0 ? ` (${totalFotos})` : ""}
-                      </button>
-
-                      <button
-                        type="button"
-                        className="btn-secondary"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          setDetailsModalOs(os);
-
-                          if (canEdit) {
-                            setIsEditingDetails(true);
-                          } else {
-                            setIsEditingDetails(false);
-                            openAlertModal(
-                              "Sem permissão",
-                              "Você não tem permissão para editar esta OS."
-                            );
-                          }
-                        }}
-                      >
-                        {canEdit ? "Editar" : "Dados"}
-                      </button>
+                      {normalizeFotos(os.fotosExecucao).length > 0 && (
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            openPhotoModalForOs(os, "execucao");
+                          }}
+                        >
+                          Fotos ({normalizeFotos(os.fotosExecucao).length})
+                        </button>
+                      )}
                     </div>
                   </article>
                 );
               })}
             </div>
+
+            <AppPagination
+              currentPage={currentPage}
+              totalPages={totalPages}
+              totalItems={filtradas.length}
+              onPageChange={setCurrentPage}
+              variant="bottom"
+              label="OS"
+            />
           </>
         )}
       </div>
@@ -2554,13 +3012,8 @@ async function handleSaveDetails() {
                     <label>Status</label>
                     <input
                       className="field-readonly"
-                      readOnly={readOnlyEditableFields}
-                      value={detailsModalOs.status || "ABERTA"}
-                      onChange={(e) =>
-                        setDetailsModalOs((prev) =>
-                          prev ? { ...prev, status: e.target.value } : prev
-                        )
-                      }
+                      readOnly
+                      value={formatOrdemStatusLabel(detailsModalOs.status, { uppercase: true })}
                     />
                   </div>
 
@@ -2687,6 +3140,36 @@ async function handleSaveDetails() {
 
 
               <div className="page-section">
+                <h3>Histórico operacional</h3>
+                {auditoriaEventos.length === 0 ? (
+                  <p className="field-hint">
+                    Nenhum registro de auditoria foi encontrado para esta OS ainda.
+                  </p>
+                ) : (
+                  <div className="audit-timeline">
+                    {auditoriaEventos.slice(0, 8).map((evento) => (
+                      <div className="audit-item" key={evento.id}>
+                        <div className="audit-dot" aria-hidden="true" />
+                        <div>
+                          <strong>{evento.titulo}</strong>
+                          <span>
+                            {formatAuditDate(evento.criadoEm)}
+                            {evento.usuarioEmail ? ` • ${evento.usuarioEmail}` : ""}
+                          </span>
+                          {evento.descricao && <p>{evento.descricao}</p>}
+                          {(evento.statusAntes || evento.statusDepois) && (
+                            <small>
+                              Status: {evento.statusAntes || "-"} → {evento.statusDepois || "-"}
+                            </small>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="page-section">
                 <h3>PDF da OS anexado</h3>
                 <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", flexWrap: "wrap" }}>
                   {hasAttachedPdf(detailsModalOs) ? (
@@ -2710,36 +3193,20 @@ async function handleSaveDetails() {
               </div>
 
               <div className="page-section">
-                <h3>Fotos da abertura da OS (Operador)</h3>
-                <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", flexWrap: "wrap" }}>
-                  <button
-                    type="button"
-                    className="btn-secondary"
-                    onClick={() => openPhotoModalFromDetails("abertura")}
-                  >
-                    Ver fotos cadastradas
-                    {fotosAberturaDetalhes.length > 0 ? ` (${fotosAberturaDetalhes.length})` : ""}
-                  </button>
-                  {fotosAberturaDetalhes.length === 0 && (
-                    <span className="field-hint">Nenhuma foto cadastrada na abertura desta OS.</span>
-                  )}
-                </div>
-              </div>
-
-              <div className="page-section">
-                <h3>Fotos da execução (Terceirizada)</h3>
+                <h3>Fotos de execução da terceirizada</h3>
                 <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", flexWrap: "wrap" }}>
                   <button
                     type="button"
                     className="btn-secondary"
                     onClick={() => openPhotoModalFromDetails("execucao")}
+                    disabled={fotosExecucaoDetalhes.length === 0}
                   >
-                    Ver fotos cadastradas
+                    Ver fotos
                     {fotosExecucaoDetalhes.length > 0 ? ` (${fotosExecucaoDetalhes.length})` : ""}
                   </button>
                   {fotosExecucaoDetalhes.length === 0 && (
                     <span className="field-hint">
-                      Nenhuma foto de execução cadastrada pela terceirizada para esta OS.
+                      Nenhuma foto de encerramento foi enviada pela terceirizada para esta OS.
                     </span>
                   )}
                 </div>
@@ -2756,7 +3223,29 @@ async function handleSaveDetails() {
                 Fechar
               </button>
 
-              {canEditCurrent && isEditingDetails && (
+              {canEditCurrent && detailsModalFechada && (
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={() => handleReabrirOs(detailsModalOs)}
+                  disabled={savingDetails}
+                >
+                  {savingDetails ? "Reabrindo..." : "Reabrir OS"}
+                </button>
+              )}
+
+              {canEditCurrentFields && !isEditingDetails && (
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={() => setIsEditingDetails(true)}
+                  disabled={savingDetails}
+                >
+                  Editar OS
+                </button>
+              )}
+
+              {canEditCurrentFields && isEditingDetails && (
                 <button
                   type="button"
                   className="btn-primary"
@@ -2767,16 +3256,18 @@ async function handleSaveDetails() {
                 </button>
               )}
 
-              {normalizeStatus(detailsModalOs.status) === "AGUARDANDO_SANEAR" ? (
+              {!detailsModalFechada && normalizeStatus(detailsModalOs.status) === "AGUARDANDO_SANEAR" && (
                 <button
                   type="button"
-                  className="btn-primary"
+                  className="btn-secondary"
                   onClick={handleRetomarSanear}
                   disabled={savingDetails}
                 >
-                  {savingDetails ? "Atualizando..." : "SANEAR liberou (retomar)"}
+                  {savingDetails ? "Atualizando..." : "SANEAR liberou"}
                 </button>
-              ) : (
+              )}
+
+              {!detailsModalFechada && normalizeStatus(detailsModalOs.status) !== "AGUARDANDO_SANEAR" && (
                 <button
                   type="button"
                   className="btn-secondary"
@@ -2793,7 +3284,7 @@ async function handleSaveDetails() {
 
               <button
                 type="button"
-                className="btn-primary btn-danger"
+                className="btn-danger"
                 onClick={() => handleDeleteOs(detailsModalOs)}
                 disabled={savingDetails}
               >
@@ -2811,7 +3302,6 @@ async function handleSaveDetails() {
           const fotos = getFotosFromModalState(photoModal);
           const fotoAtual = fotos[photoModal.currentIndex] ?? fotos[0];
 
-          const totalAbertura = normalizeFotos(os?.fotos).length;
           const totalExec = normalizeFotos(os?.fotosExecucao).length;
 
           return (
@@ -2819,7 +3309,7 @@ async function handleSaveDetails() {
               <div className="modal modal-photo" onClick={(e) => e.stopPropagation()}>
                 <div className="modal-header">
                   <h3 className="modal-title">
-                    Fotos da OS {os?.ordemServico || os?.protocolo || os?.id || photoModal.osId}
+                    Fotos da Terceirizada — OS {os?.ordemServico || os?.protocolo || os?.id || photoModal.osId}
                   </h3>
                   <button type="button" className="modal-close" onClick={closePhotoModal}>
                     ×
@@ -2835,31 +3325,9 @@ async function handleSaveDetails() {
                     flexWrap: "wrap",
                   }}
                 >
-                  <button
-                    type="button"
-                    className={photoModal.tipo === "abertura" ? "btn-primary" : "btn-secondary"}
-                    onClick={() =>
-                      setPhotoModal((prev) =>
-                        prev ? { ...prev, tipo: "abertura", currentIndex: 0 } : prev
-                      )
-                    }
-                    disabled={totalAbertura === 0}
-                  >
-                    Fotos do Operador{totalAbertura > 0 ? ` (${totalAbertura})` : ""}
-                  </button>
-
-                  <button
-                    type="button"
-                    className={photoModal.tipo === "execucao" ? "btn-primary" : "btn-secondary"}
-                    onClick={() =>
-                      setPhotoModal((prev) =>
-                        prev ? { ...prev, tipo: "execucao", currentIndex: 0 } : prev
-                      )
-                    }
-                    disabled={totalExec === 0}
-                  >
+                  <span className="btn-primary" style={{ pointerEvents: "none" }}>
                     Fotos da Terceirizada{totalExec > 0 ? ` (${totalExec})` : ""}
-                  </button>
+                  </span>
                 </div>
 
                 <div className="modal-body modal-photo-body">
@@ -2867,9 +3335,7 @@ async function handleSaveDetails() {
 
                   {os && fotos.length === 0 && (
                     <p className="field-hint">
-                      {photoModal.tipo === "abertura"
-                        ? "Nenhuma foto cadastrada pelo operador para esta OS."
-                        : "Nenhuma foto cadastrada pela terceirizada para esta OS."}
+                      Nenhuma foto cadastrada pela terceirizada para esta OS.
                     </p>
                   )}
 
@@ -2882,9 +3348,8 @@ async function handleSaveDetails() {
                       )}
 
                       <div style={{ maxWidth: "100%", width: "100%", textAlign: "center" }}>
-                        <img
-                          src={fotoAtual.url}
-                          alt={fotoAtual.label}
+                        <ZipAwarePhoto
+                          photo={fotoAtual}
                           style={{
                             width: "100%",
                             maxHeight: "70vh",
@@ -2927,19 +3392,19 @@ async function handleSaveDetails() {
                     </button>
 
                     {os && fotos.length > 0 && (
-                      <button type="button" className="btn-primary" onClick={handlePrintCurrentPhoto}>
+                      <button type="button" className="btn-secondary" onClick={handlePrintCurrentPhoto}>
                         Imprimir
                       </button>
                     )}
 
-                    {os && canEditOs(os) && fotos.length > 0 && (
-                      <button type="button" className="btn-primary btn-danger" onClick={handleDeleteCurrentPhoto}>
+                    {os && canEditOs(os) && !isOsFechada(os) && fotos.length > 0 && (
+                      <button type="button" className="btn-danger" onClick={handleDeleteCurrentPhoto}>
                         Excluir foto
                       </button>
                     )}
                   </div>
 
-                  {os && canEditOs(os) && (
+                  {os && canEditOs(os) && !isOsFechada(os) && fotos.length < 2 && (
                     <div>
                       <input
                         ref={addPhotoInputRef}
@@ -2949,7 +3414,7 @@ async function handleSaveDetails() {
                         style={{ display: "none" }}
                         onChange={handleAddPhotosChange}
                       />
-                      <button type="button" className="btn-primary" onClick={triggerAddPhotos}>
+                      <button type="button" className="btn-secondary" onClick={triggerAddPhotos}>
                         Adicionar fotos
                       </button>
                     </div>

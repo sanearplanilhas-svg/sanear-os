@@ -1,13 +1,43 @@
-# Dependências e builds
+# Dependências
 node_modules/
-dist/
-dist-ssr/
+
+# Builds e saídas geradas
+/dist/
+/dist-ssr/
+/dev-dist/
+/build/
+/.vite/
+/.turbo/
+/.cache/
+
+# PWA / Firebase / Vercel
+/.firebase/
+/.vercel/
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
 
 # Variáveis locais e segredos
 .env
 .env.*
 !.env.example
 *.local
+
+# Backups e pacotes locais
+*.zip
+*.rar
+*.7z
+*.tar
+*.gz
+*.bak
+*.backup
+
+# Banco local e arquivos temporários
+*.sqlite
+*.sqlite3
+*.db
+*.tmp
+*.temp
 
 # Logs
 logs/
@@ -23,8 +53,12 @@ lerna-debug.log*
 !.vscode/extensions.json
 .idea/
 .DS_Store
+Thumbs.db
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
+
+# Evita duplicar o projeto dentro dele mesmo
+/sanear-os/

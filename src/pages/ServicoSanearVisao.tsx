@@ -9,9 +9,21 @@ import {
   serverTimestamp,
   Timestamp,
   updateDoc,
+  arrayUnion,
 } from "firebase/firestore";
 import { auth, db } from "../lib/firebaseClient";
-import { SLA_HORAS_PADRAO } from "../lib/sla";
+import { supabase } from "../lib/supabaseClient";
+import { extractFirstFileObjectUrlFromZipUrl, isZipReference } from "../lib/storageZip";
+import { SLA_CONFIGS, getSlaHorasFromOrder } from "../lib/sla";
+import { registrarAuditoriaOs } from "../lib/auditoria";
+import {
+  formatOrdemStatusLabel,
+  getOrdemStatusCssClass,
+  isOrdemAberta,
+  isOrdemCancelada,
+  isOrdemConcluida,
+} from "../lib/status";
+import { AppPagination } from "../components/ui";
 import "./TerceirizadaVisao.css";
 
 type TipoCaminhaoExecucao = "PROPRIO" | "TERCEIRIZADO";
@@ -35,12 +47,15 @@ type FirestoreOS = {
   dataExecucao?: Timestamp | null;
   updatedAt?: Timestamp | null;
   slaHoras?: number | null;
+  slaServico?: string | null;
 
   ordemServicoPdfBase64?: string | null;
   ordemServicoPdfNomeArquivo?: string | null;
   ordemServicoPdfDataAnexo?: string | null;
   ordemServicoPdfUrl?: string | null;
   ordemServicoPdfPath?: string | null;
+  ordemServicoPdfCompactado?: boolean | null;
+  ordemServicoPdfMimeTypeOriginal?: string | null;
 
   tipoCaminhaoExecucao?: TipoCaminhaoExecucao | null;
   tipoCaminhaoExecucaoLabel?: string | null;
@@ -48,58 +63,26 @@ type FirestoreOS = {
 };
 
 const COLLECTION_NAME = "ordensHidrojato";
-
-function normalizeStatusValue(status?: string | null): string {
-  return String(status ?? "").trim().toUpperCase();
-}
+const STORAGE_BUCKET = "os-arquivos";
 
 function isDoneStatus(status?: string | null): boolean {
-  const s = normalizeStatusValue(status);
-  return s === "CONCLUIDA" || s === "CONCLUÍDA" || s === "CONCLUIDO";
+  return isOrdemConcluida(status);
 }
 
 function isCanceledStatus(status?: string | null): boolean {
-  const s = normalizeStatusValue(status);
-  return s === "CANCELADA" || s === "CANCELADO";
+  return isOrdemCancelada(status);
 }
 
 function isOpenStatus(status?: string | null): boolean {
-  return !isDoneStatus(status) && !isCanceledStatus(status);
+  return isOrdemAberta(status);
 }
 
 function statusClass(status?: string | null): string {
-  const s = normalizeStatusValue(status);
-  if (s === "CONCLUIDA" || s === "CONCLUÍDA" || s === "CONCLUIDO") {
-    return "os-status-badge os-status-concluida";
-  }
-  if (s === "ANDAMENTO" || s === "EM_ANDAMENTO") {
-    return "os-status-badge os-status-andamento";
-  }
-  if (s === "AGUARDANDO_SANEAR") {
-    return "os-status-badge os-status-aguardando-sanear";
-  }
-  if (s === "CANCELADA" || s === "CANCELADO") {
-    return "os-status-badge os-status-cancelada";
-  }
-  return "os-status-badge os-status-aberta";
+  return getOrdemStatusCssClass(status);
 }
 
 function formatStatusLabel(status?: string | null): string {
-  const s = normalizeStatusValue(status);
-
-  const labels: Record<string, string> = {
-    ABERTA: "ABERTA",
-    ANDAMENTO: "EM ANDAMENTO",
-    EM_ANDAMENTO: "EM ANDAMENTO",
-    AGUARDANDO_SANEAR: "AGUARDANDO SANEAR",
-    CONCLUIDA: "CONCLUÍDA",
-    "CONCLUÍDA": "CONCLUÍDA",
-    CONCLUIDO: "CONCLUÍDA",
-    CANCELADA: "CANCELADA",
-    CANCELADO: "CANCELADA",
-  };
-
-  return labels[s] || s.replaceAll("_", " ") || "ABERTA";
+  return formatOrdemStatusLabel(status, { uppercase: true });
 }
 
 function formatDateTime(value?: Timestamp | null): string {
@@ -159,6 +142,8 @@ const ServicoSanearVisao: React.FC = () => {
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [statusType, setStatusType] = useState<StatusType>("info");
   const [infoModal, setInfoModal] = useState<{ title: string; message: string } | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const PAGE_SIZE = 10;
 
   useEffect(() => {
     const qHidrojato = query(
@@ -190,6 +175,7 @@ const ServicoSanearVisao: React.FC = () => {
             dataExecucao: raw.dataExecucao ?? null,
             updatedAt: raw.updatedAt ?? null,
             slaHoras: raw.slaHoras ?? null,
+            slaServico: raw.slaServico ?? null,
             ordemServicoPdfBase64:
               raw.ordemServicoPdfBase64 ?? pdfNested?.base64 ?? null,
             ordemServicoPdfNomeArquivo:
@@ -198,6 +184,16 @@ const ServicoSanearVisao: React.FC = () => {
               raw.ordemServicoPdfDataAnexo ?? pdfNested?.dataAnexoTexto ?? null,
             ordemServicoPdfUrl: raw.ordemServicoPdfUrl ?? pdfNested?.url ?? null,
             ordemServicoPdfPath: raw.ordemServicoPdfPath ?? pdfNested?.path ?? null,
+            ordemServicoPdfCompactado:
+              raw.ordemServicoPdfCompactado ??
+              raw.ordemServicoPdfCompactadoZip ??
+              pdfNested?.compactado ??
+              pdfNested?.compactadoZip ??
+              false,
+            ordemServicoPdfMimeTypeOriginal:
+              raw.ordemServicoPdfMimeTypeOriginal ??
+              pdfNested?.mimeTypeOriginal ??
+              "application/pdf",
             tipoCaminhaoExecucao: raw.tipoCaminhaoExecucao ?? null,
             tipoCaminhaoExecucaoLabel: raw.tipoCaminhaoExecucaoLabel ?? null,
             finalizadoPorEmail: raw.finalizadoPorEmail ?? null,
@@ -221,6 +217,16 @@ const ServicoSanearVisao: React.FC = () => {
     return () => unsubscribe();
   }, []);
 
+  useEffect(() => {
+    if (!statusMessage) return;
+
+    const timer = window.setTimeout(() => {
+      setStatusMessage(null);
+    }, 3000);
+
+    return () => window.clearTimeout(timer);
+  }, [statusMessage]);
+
   const totalAbertas = useMemo(
     () => ordens.filter((os) => isOpenStatus(os.status)).length,
     [ordens]
@@ -233,6 +239,16 @@ const ServicoSanearVisao: React.FC = () => {
 
   const totalCanceladas = useMemo(
     () => ordens.filter((os) => isCanceledStatus(os.status)).length,
+    [ordens]
+  );
+
+  const totalCaminhaoProprio = useMemo(
+    () => ordens.filter((os) => isDoneStatus(os.status) && String(os.tipoCaminhaoExecucao ?? "").toUpperCase() === "PROPRIO").length,
+    [ordens]
+  );
+
+  const totalCaminhaoTerceirizado = useMemo(
+    () => ordens.filter((os) => isDoneStatus(os.status) && String(os.tipoCaminhaoExecucao ?? "").toUpperCase() === "TERCEIRIZADO").length,
     [ordens]
   );
 
@@ -265,6 +281,28 @@ const ServicoSanearVisao: React.FC = () => {
     });
   }, [ordens, statusTab, busca]);
 
+  const totalPages = useMemo(() => {
+    return Math.max(1, Math.ceil(filtradas.length / PAGE_SIZE));
+  }, [filtradas.length, PAGE_SIZE]);
+
+  const paginatedOrdens = useMemo(() => {
+    const start = (currentPage - 1) * PAGE_SIZE;
+    return filtradas.slice(start, start + PAGE_SIZE);
+  }, [filtradas, currentPage, PAGE_SIZE]);
+
+  const paginationStart = filtradas.length === 0 ? 0 : (currentPage - 1) * PAGE_SIZE + 1;
+  const paginationEnd = Math.min(currentPage * PAGE_SIZE, filtradas.length);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [statusTab, busca]);
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
+
   function handleOpenModal(os: FirestoreOS) {
     setModalOs(os);
     setTipoCaminhaoExecucao(os.tipoCaminhaoExecucao ?? "");
@@ -275,23 +313,183 @@ const ServicoSanearVisao: React.FC = () => {
     setTipoCaminhaoExecucao("");
   }
 
-  function handleOpenPdf(os: FirestoreOS) {
-    if (os.ordemServicoPdfUrl) {
-      window.open(os.ordemServicoPdfUrl, "_blank", "noopener,noreferrer");
-      return;
+  async function resolveAttachedPdfUrl(os: FirestoreOS): Promise<{ url: string; shouldRevoke: boolean } | null> {
+    const rawUrl = os.ordemServicoPdfUrl || null;
+    const rawPath = os.ordemServicoPdfPath || null;
+    const zipped =
+      Boolean(os.ordemServicoPdfCompactado) ||
+      isZipReference(rawUrl) ||
+      isZipReference(rawPath);
+    const originalMime = os.ordemServicoPdfMimeTypeOriginal || "application/pdf";
+
+    if (rawUrl) {
+      if (zipped) {
+        const extracted = await extractFirstFileObjectUrlFromZipUrl(rawUrl, originalMime);
+        return { url: extracted.url, shouldRevoke: true };
+      }
+
+      return { url: rawUrl, shouldRevoke: false };
+    }
+
+    if (rawPath) {
+      const { data } = supabase.storage
+        .from(STORAGE_BUCKET)
+        .getPublicUrl(rawPath);
+
+      if (data.publicUrl) {
+        if (zipped) {
+          const extracted = await extractFirstFileObjectUrlFromZipUrl(data.publicUrl, originalMime);
+          return { url: extracted.url, shouldRevoke: true };
+        }
+
+        return { url: data.publicUrl, shouldRevoke: false };
+      }
     }
 
     if (os.ordemServicoPdfBase64) {
-      const url = base64PdfToObjectUrl(os.ordemServicoPdfBase64);
-      window.open(url, "_blank", "noopener,noreferrer");
-      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      return { url: base64PdfToObjectUrl(os.ordemServicoPdfBase64), shouldRevoke: true };
+    }
+
+    return null;
+  }
+
+  async function handleOpenPdf(os: FirestoreOS) {
+    try {
+      const pdf = await resolveAttachedPdfUrl(os);
+
+      if (!pdf) {
+        setInfoModal({
+          title: "PDF não encontrado",
+          message: "Esta OS de Hidrojato não possui PDF anexado.",
+        });
+        return;
+      }
+
+      window.open(pdf.url, "_blank", "noopener,noreferrer");
+
+      if (pdf.shouldRevoke) {
+        window.setTimeout(() => URL.revokeObjectURL(pdf.url), 60_000);
+      }
+    } catch (error) {
+      console.error(error);
+      setInfoModal({
+        title: "Não foi possível abrir o PDF",
+        message: "O anexo pode estar compactado ou indisponível no armazenamento. Tente novamente em alguns instantes.",
+      });
+    }
+  }
+
+  async function handleReabrirServico() {
+    if (!modalOs) return;
+
+    if (!isDoneStatus(modalOs.status)) {
+      setInfoModal({
+        title: "OS já está aberta",
+        message: "Esta ordem já está disponível para execução.",
+      });
       return;
     }
 
-    setInfoModal({
-      title: "PDF não encontrado",
-      message: "Esta OS de Hidrojato não possui PDF anexado.",
-    });
+    const motivoInformado = window.prompt(
+      "Informe o motivo da reabertura da OS:",
+      "Correção ou nova finalização necessária."
+    );
+
+    if (motivoInformado === null) return;
+
+    const motivoReabertura = motivoInformado.trim();
+    if (!motivoReabertura) {
+      setInfoModal({
+        title: "Motivo obrigatório",
+        message: "Informe o motivo da reabertura antes de continuar.",
+      });
+      return;
+    }
+
+    const confirmar = window.confirm(
+      "Deseja reabrir esta OS? A execução atual será preservada no histórico e a OS ficará disponível para nova finalização."
+    );
+
+    if (!confirmar) return;
+
+    try {
+      setIsUpdating(true);
+
+      const temExecucaoAnterior =
+        !!modalOs.dataExecucao ||
+        !!modalOs.finalizadoPorEmail ||
+        !!modalOs.tipoCaminhaoExecucao ||
+        !!modalOs.tipoCaminhaoExecucaoLabel;
+
+      const historicoExecucao = {
+        tipo: "REABERTURA_EXECUCAO",
+        statusAnterior: modalOs.status ?? null,
+        dataExecucao: modalOs.dataExecucao ?? null,
+        tipoCaminhaoExecucao: modalOs.tipoCaminhaoExecucao ?? null,
+        tipoCaminhaoExecucaoLabel: modalOs.tipoCaminhaoExecucaoLabel ?? null,
+        finalizadoPorEmail: modalOs.finalizadoPorEmail ?? null,
+        motivoReabertura,
+        reabertaEm: Timestamp.now(),
+        reabertaPorEmail: auth.currentUser?.email ?? null,
+        reabertaPorUid: auth.currentUser?.uid ?? null,
+      };
+
+      await updateDoc(doc(db, COLLECTION_NAME, modalOs.id), {
+        status: "ABERTA",
+        dataExecucao: null,
+        tipoCaminhaoExecucao: null,
+        tipoCaminhaoExecucaoLabel: null,
+        finalizadoPorArea: null,
+        finalizadoPorEmail: null,
+        finalizadoPorUid: null,
+        reabertaEm: serverTimestamp(),
+        reabertaPorEmail: auth.currentUser?.email ?? null,
+        reabertaPorUid: auth.currentUser?.uid ?? null,
+        motivoUltimaReabertura: motivoReabertura,
+        ...(temExecucaoAnterior ? { historicoExecucoes: arrayUnion(historicoExecucao) } : {}),
+        updatedAt: serverTimestamp(),
+      });
+
+      void registrarAuditoriaOs({
+        osId: modalOs.id,
+        origem: "hidrojato",
+        collectionName: COLLECTION_NAME,
+        acao: "REABERTURA_OS",
+        titulo: "OS de Hidrojato reaberta",
+        descricao: motivoReabertura,
+        statusAntes: modalOs.status ?? null,
+        statusDepois: "ABERTA",
+        detalhes: { execucaoAnteriorPreservada: temExecucaoAnterior },
+      });
+
+      setModalOs((prev) =>
+        prev
+          ? {
+              ...prev,
+              status: "ABERTA",
+              dataExecucao: null,
+              tipoCaminhaoExecucao: null,
+              tipoCaminhaoExecucaoLabel: null,
+              finalizadoPorEmail: null,
+            }
+          : prev
+      );
+      setTipoCaminhaoExecucao("");
+      setStatusType("success");
+      setStatusMessage(
+        temExecucaoAnterior
+          ? "OS reaberta com sucesso. A execução anterior foi preservada no histórico."
+          : "OS reaberta com sucesso."
+      );
+    } catch (error) {
+      console.error(error);
+      setInfoModal({
+        title: "Erro ao reabrir",
+        message: "Não foi possível reabrir esta OS. Verifique sua conexão e tente novamente.",
+      });
+    } finally {
+      setIsUpdating(false);
+    }
   }
 
   async function handleFinalizarServico() {
@@ -328,6 +526,18 @@ const ServicoSanearVisao: React.FC = () => {
         finalizadoPorArea: "SERVICO_SANEAR",
         finalizadoPorEmail: auth.currentUser?.email?.toLowerCase() ?? null,
         finalizadoPorUid: auth.currentUser?.uid ?? null,
+      });
+
+      void registrarAuditoriaOs({
+        osId: modalOs.id,
+        origem: "hidrojato",
+        collectionName: COLLECTION_NAME,
+        acao: "FINALIZACAO_SANEAR",
+        titulo: "OS de Hidrojato finalizada",
+        descricao: `Serviço registrado como ${label.toLowerCase()}.`,
+        statusAntes: modalOs.status ?? null,
+        statusDepois: "CONCLUIDA",
+        detalhes: { tipoCaminhaoExecucao, tipoCaminhaoExecucaoLabel: label },
       });
 
       const execTimestamp = Timestamp.now();
@@ -382,6 +592,12 @@ const ServicoSanearVisao: React.FC = () => {
             Consulte a OS em PDF, acompanhe o prazo de atendimento e finalize informando
             se a execução foi realizada com caminhão próprio ou caminhão terceirizado.
           </p>
+
+          <div className="servico-sanear-hero-mini">
+            <span><b>{totalCaminhaoProprio}</b> próprio(s)</span>
+            <span><b>{totalCaminhaoTerceirizado}</b> terceirizado(s)</span>
+            <span><b>{totalConcluidas}</b> finalizada(s)</span>
+          </div>
         </div>
 
         <div className="terceirizada-highlight">
@@ -405,13 +621,13 @@ const ServicoSanearVisao: React.FC = () => {
           <div className="sla-explainer-title">Prazo de atendimento</div>
           <p className="sla-explainer-text">
             As ordens de Hidrojato seguem o mesmo padrão operacional do sistema, com prazo
-            padrão de <strong>{SLA_HORAS_PADRAO} horas úteis</strong> e controle por status.
+            prazo de <strong>{SLA_CONFIGS.HIDROJATO.horas} horas úteis</strong> para Hidrojato e controle por status.
           </p>
         </div>
       </div>
 
       <div className="os-kpi-row">
-        <div className="os-kpi-card">
+        <div className="os-kpi-card servico-sanear-kpi is-open">
           <div>
             <div className="os-kpi-label">OS em aberto</div>
             <div className="os-kpi-value">{totalAbertas}</div>
@@ -419,7 +635,7 @@ const ServicoSanearVisao: React.FC = () => {
           <span className="os-kpi-pill">Aguardando execução</span>
         </div>
 
-        <div className="os-kpi-card">
+        <div className="os-kpi-card servico-sanear-kpi is-done">
           <div>
             <div className="os-kpi-label">OS concluídas</div>
             <div className="os-kpi-value">{totalConcluidas}</div>
@@ -427,7 +643,7 @@ const ServicoSanearVisao: React.FC = () => {
           <span className="os-kpi-pill os-kpi-pill-success">Finalizadas</span>
         </div>
 
-        <div className="os-kpi-card">
+        <div className="os-kpi-card servico-sanear-kpi is-total">
           <div>
             <div className="os-kpi-label">Total de OS</div>
             <div className="os-kpi-value">{ordens.length}</div>
@@ -492,11 +708,22 @@ const ServicoSanearVisao: React.FC = () => {
               </span>
             </div>
 
+            <AppPagination
+              currentPage={currentPage}
+              totalPages={totalPages}
+              totalItems={filtradas.length}
+              pageStart={paginationStart}
+              pageEnd={paginationEnd}
+              onPageChange={setCurrentPage}
+              variant="top"
+              label="OS"
+            />
+
             <div className="os-list">
-              {filtradas.map((os) => (
+              {paginatedOrdens.map((os) => (
                 <article
                   key={os.id}
-                  className="os-card"
+                  className={`os-card servico-sanear-os-card ${isDoneStatus(os.status) ? "is-done" : "is-open"}`}
                   onClick={() => handleOpenModal(os)}
                   role="button"
                   tabIndex={0}
@@ -507,25 +734,46 @@ const ServicoSanearVisao: React.FC = () => {
                     }
                   }}
                 >
-                  <div className="os-card-header">
+                  <div className="os-card-header servico-sanear-card-header">
                     <div>
+                      <span className="servico-sanear-card-eyebrow">Caminhão Hidrojato</span>
                       <h3>{getIdentificacao(os)}</h3>
                       <p className="os-card-address">{getEndereco(os)}</p>
                     </div>
-                    <div>
+                    <div className="servico-sanear-status-area">
                       <span className={statusClass(os.status)}>
                         {formatStatusLabel(os.status)}
                       </span>
+                      {os.ordemServicoPdfUrl || os.ordemServicoPdfBase64 ? (
+                        <span className="servico-sanear-pdf-chip">PDF anexado</span>
+                      ) : (
+                        <span className="servico-sanear-pdf-chip is-missing">Sem PDF</span>
+                      )}
                     </div>
                   </div>
 
-                  <div className="os-card-meta">
-                    <span>Criado em {formatDateTime(os.createdAt)}</span>
-                    {isDoneStatus(os.status) && (
-                      <span>Execução: {getCaminhaoLabel(os.tipoCaminhaoExecucao)}</span>
-                    )}
-                    {os.createdByEmail && <span>Por {os.createdByEmail}</span>}
+                  <div className="servico-sanear-card-info">
+                    <div>
+                      <span>Criada</span>
+                      <strong>{formatDateTime(os.createdAt)}</strong>
+                    </div>
+                    <div>
+                      <span>Prazo</span>
+                      <strong>{getSlaHorasFromOrder(os)}h úteis</strong>
+                    </div>
+                    <div>
+                      <span>Execução</span>
+                      <strong>{formatDateTime(os.dataExecucao)}</strong>
+                    </div>
+                    <div>
+                      <span>Caminhão</span>
+                      <strong>{getCaminhaoLabel(os.tipoCaminhaoExecucao)}</strong>
+                    </div>
                   </div>
+
+                  {os.createdByEmail && (
+                    <div className="servico-sanear-created-by">Responsável pelo cadastro: {os.createdByEmail}</div>
+                  )}
 
                   <div className="servico-sanear-card-actions">
                     <button
@@ -546,12 +794,21 @@ const ServicoSanearVisao: React.FC = () => {
                         handleOpenModal(os);
                       }}
                     >
-                      {isDoneStatus(os.status) ? "Ver dados" : "Finalizar"}
+                      {isDoneStatus(os.status) ? "Ver detalhes" : "Finalizar"}
                     </button>
                   </div>
                 </article>
               ))}
             </div>
+
+            <AppPagination
+              currentPage={currentPage}
+              totalPages={totalPages}
+              totalItems={filtradas.length}
+              onPageChange={setCurrentPage}
+              variant="bottom"
+              label="OS"
+            />
           </section>
         )}
       </div>
@@ -559,13 +816,15 @@ const ServicoSanearVisao: React.FC = () => {
       {modalOs && (
         <div className="modal-backdrop" onClick={handleCloseModal}>
           <div className="modal servico-sanear-modal" style={{ maxWidth: 900, width: "94%" }} onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
+            <div className="modal-header servico-sanear-modal-header">
               <div>
+                <span className="servico-sanear-card-eyebrow">Área de Serviço SANEAR</span>
                 <h3 className="modal-title">OS de Caminhão Hidrojato</h3>
                 <p className="page-section-description" style={{ margin: "0.25rem 0 0" }}>
-                  {getIdentificacao(modalOs)}
+                  {getIdentificacao(modalOs)} • {formatStatusLabel(modalOs.status)}
                 </p>
               </div>
+              <span className={statusClass(modalOs.status)}>{formatStatusLabel(modalOs.status)}</span>
               <button type="button" className="modal-close" onClick={handleCloseModal}>
                 ×
               </button>
@@ -644,61 +903,91 @@ const ServicoSanearVisao: React.FC = () => {
                 <textarea className="field-readonly" value={modalOs.observacoes || "-"} readOnly rows={3} />
               </div>
 
-              <div className="page-section">
-                <h3>Finalização interna</h3>
-                <p className="page-section-description">
-                  Antes de finalizar, informe qual caminhão executou o serviço. Essa informação
-                  ficará gravada na OS e poderá ser conferida na listagem e no backup.
-                </p>
-
-                <div className="page-field">
-                  <label>Serviço feito por</label>
-                  <div className="truck-choice-grid" role="group" aria-label="Tipo de caminhão da execução">
-                    <button
-                      type="button"
-                      className={`truck-choice-card ${tipoCaminhaoExecucao === "PROPRIO" ? "is-selected" : ""}`}
-                      onClick={() => setTipoCaminhaoExecucao("PROPRIO")}
-                      disabled={isDoneStatus(modalOs.status) || isUpdating}
-                    >
-                      <span>🚛</span>
-                      <strong>Caminhão próprio</strong>
-                      <small>Equipe e veículo da SANEAR</small>
-                    </button>
-
-                    <button
-                      type="button"
-                      className={`truck-choice-card ${tipoCaminhaoExecucao === "TERCEIRIZADO" ? "is-selected" : ""}`}
-                      onClick={() => setTipoCaminhaoExecucao("TERCEIRIZADO")}
-                      disabled={isDoneStatus(modalOs.status) || isUpdating}
-                    >
-                      <span>🤝</span>
-                      <strong>Caminhão terceirizado</strong>
-                      <small>Apoio contratado para execução</small>
-                    </button>
+              {isDoneStatus(modalOs.status) ? (
+                <div className="page-section servico-sanear-execution-summary">
+                  <h3>Resumo da execução</h3>
+                  <p className="page-section-description">
+                    Esta OS já foi finalizada. Para alterar dados de execução, reabra a OS primeiro.
+                  </p>
+                  <div className="servico-sanear-summary-grid">
+                    <div>
+                      <span>Serviço feito por</span>
+                      <strong>{modalOs.tipoCaminhaoExecucaoLabel || getCaminhaoLabel(modalOs.tipoCaminhaoExecucao)}</strong>
+                    </div>
+                    <div>
+                      <span>Finalizada em</span>
+                      <strong>{formatDateTime(modalOs.dataExecucao)}</strong>
+                    </div>
+                    <div>
+                      <span>Finalizada por</span>
+                      <strong>{modalOs.finalizadoPorEmail || "-"}</strong>
+                    </div>
                   </div>
                 </div>
-              </div>
+              ) : (
+                <div className="page-section">
+                  <h3>Finalização interna</h3>
+                  <p className="page-section-description">
+                    Antes de finalizar, informe qual caminhão executou o serviço. Essa informação
+                    ficará gravada na OS e poderá ser conferida na listagem e no backup.
+                  </p>
+
+                  <div className="page-field">
+                    <label>Serviço feito por</label>
+                    <div className="truck-choice-grid" role="group" aria-label="Tipo de caminhão da execução">
+                      <button
+                        type="button"
+                        className={`truck-choice-card ${tipoCaminhaoExecucao === "PROPRIO" ? "is-selected" : ""}`}
+                        onClick={() => setTipoCaminhaoExecucao("PROPRIO")}
+                        disabled={isUpdating}
+                      >
+                        <span>🚛</span>
+                        <strong>Caminhão próprio</strong>
+                        <small>Equipe e veículo da SANEAR</small>
+                      </button>
+
+                      <button
+                        type="button"
+                        className={`truck-choice-card ${tipoCaminhaoExecucao === "TERCEIRIZADO" ? "is-selected" : ""}`}
+                        onClick={() => setTipoCaminhaoExecucao("TERCEIRIZADO")}
+                        disabled={isUpdating}
+                      >
+                        <span>🤝</span>
+                        <strong>Caminhão terceirizado</strong>
+                        <small>Apoio contratado para execução</small>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
 
-            <div className="modal-footer">
+            <div className="modal-footer servico-sanear-modal-footer">
               <button type="button" className="btn-secondary" onClick={() => handleOpenPdf(modalOs)}>
                 Abrir PDF da OS
               </button>
               <button type="button" className="btn-secondary" onClick={() => window.print()}>
                 Imprimir
               </button>
-              <button
-                type="button"
-                className="btn-primary"
-                onClick={handleFinalizarServico}
-                disabled={isUpdating || isDoneStatus(modalOs.status)}
-              >
-                {isUpdating
-                  ? "Finalizando..."
-                  : isDoneStatus(modalOs.status)
-                  ? "Serviço já finalizado"
-                  : "Finalizar serviço"}
-              </button>
+              {isDoneStatus(modalOs.status) ? (
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={handleReabrirServico}
+                  disabled={isUpdating}
+                >
+                  {isUpdating ? "Reabrindo..." : "Reabrir OS"}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={handleFinalizarServico}
+                  disabled={isUpdating}
+                >
+                  {isUpdating ? "Finalizando..." : "Finalizar serviço"}
+                </button>
+              )}
             </div>
           </div>
         </div>

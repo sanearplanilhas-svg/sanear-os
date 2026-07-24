@@ -131,9 +131,7 @@ const Usuario: React.FC = () => {
   const [role, setRole] = useState<Role>("operador");
   const isAdmin = role === "adm";
 
-  // Override de admin via senha mestra
-  const [adminOverride, setAdminOverride] = useState(false);
-  const canManageUsers = isAdmin || adminOverride;
+  const canManageUsers = isAdmin;
 
   // Fonte
   const [fontScale, setFontScale] = useState<number>(1);
@@ -163,9 +161,7 @@ const Usuario: React.FC = () => {
     useState(false);
   const [overridePassword, setOverridePassword] = useState("");
   const [overrideError, setOverrideError] = useState("");
-  const [pendingAdminAction, setPendingAdminAction] = useState<
-    (() => void) | null
-  >(null);
+  const [, setPendingAdminAction] = useState<(() => void) | null>(null);
 
   // Gerenciamento de usuários (aba "Usuários")
   const [managedUsers, setManagedUsers] = useState<ManagedUser[]>([]);
@@ -201,11 +197,12 @@ const Usuario: React.FC = () => {
     setOverridePassword("");
     setOverrideError("");
 
-    if (requirePassword && onSuccess) {
-      setPendingAdminAction(() => onSuccess);
-    } else {
-      setPendingAdminAction(null);
-    }
+    // Não existe mais senha mestra no frontend.
+    // A permissão precisa vir do perfil real salvo no Firestore.
+    setPermissionModalRequirePassword(false);
+    setPendingAdminAction(null);
+    void requirePassword;
+    void onSuccess;
   }
 
   function closePermissionModal() {
@@ -218,23 +215,9 @@ const Usuario: React.FC = () => {
 
   function handlePermissionPasswordSubmit(e: FormEvent) {
     e.preventDefault();
-
-    if (!permissionModalRequirePassword) {
-      closePermissionModal();
-      return;
-    }
-
-    if (overridePassword === "29101993jps") {
-      // Libera override nesta tela
-      setAdminOverride(true);
-      const action = pendingAdminAction;
-      closePermissionModal();
-      if (action) {
-        action();
-      }
-    } else {
-      setOverrideError("Senha incorreta. Tente novamente.");
-    }
+    setOverrideError(
+      "A senha mestra foi removida por segurança. Entre com um usuário Administrador cadastrado no Firestore."
+    );
   }
 
   // Carregar dados do usuário + role (Firestore) + fonte
@@ -313,8 +296,14 @@ const Usuario: React.FC = () => {
     loadUserAndPrefs();
   }, []);
 
-  // Carregar lista de usuários do Firestore (coleção usuarios_sistema)
+  // Carregar lista de usuários do Firestore somente para Administrador.
+  // Usuário comum não pode listar a coleção inteira pelas regras do Firestore.
   useEffect(() => {
+    if (!isAdmin) {
+      setManagedUsers([]);
+      return;
+    }
+
     const q = query(
       collection(db, "usuarios_sistema"),
       orderBy("createdAt", "desc")
@@ -346,7 +335,7 @@ const Usuario: React.FC = () => {
     );
 
     return () => unsub();
-  }, []);
+  }, [isAdmin]);
 
   async function handleSaveProfile(e: FormEvent) {
     e.preventDefault();
@@ -451,7 +440,7 @@ const Usuario: React.FC = () => {
     if (tab === "usuarios" && !canManageUsers) {
       openPermissionModal(
         "Apenas o perfil Administrador pode acessar o gerenciamento de usuários.",
-        true,
+        false,
         () => setActiveTab("usuarios")
       );
       return;
@@ -621,7 +610,7 @@ const Usuario: React.FC = () => {
     if (!canManageUsers) {
       openPermissionModal(
         "Apenas o perfil Administrador pode cadastrar novos usuários.",
-        true,
+        false,
         () => {
           void createUserFromState();
         }
@@ -661,7 +650,7 @@ const Usuario: React.FC = () => {
     if (!canManageUsers) {
       openPermissionModal(
         "Apenas o perfil Administrador pode alterar o perfil de acesso dos usuários.",
-        true,
+        false,
         () => {
           void updateManagedUserRole(user, newRole);
         }
@@ -710,7 +699,7 @@ const Usuario: React.FC = () => {
     if (!canManageUsers) {
       openPermissionModal(
         "Apenas o perfil Administrador pode redefinir senhas de outros usuários.",
-        true,
+        false,
         () => {
           void sendResetEmail(user);
         }
@@ -761,8 +750,8 @@ const Usuario: React.FC = () => {
     // Admin já pode sem senha (regra original)
     if (!canManageUsers) {
       openPermissionModal(
-        "Apenas o perfil Administrador pode alterar o perfil de acesso. Digite a senha de administrador para continuar.",
-        true,
+        "Apenas o perfil Administrador pode alterar o perfil de acesso. Entre com um usuário Administrador para continuar.",
+        false,
         () => {
           void updateOwnRole(newRole);
         }
@@ -911,7 +900,7 @@ const Usuario: React.FC = () => {
                 <option value="adm">Administrador</option>
               </select>
               <p className="field-hint">
-                Para alterar seu perfil, será exigida a senha de administrador
+                Para alterar perfil de acesso, é necessário estar logado como Administrador
                 quando você não for Administrador.
               </p>
             </div>
@@ -987,7 +976,7 @@ const Usuario: React.FC = () => {
               <h3>Acesso restrito</h3>
               <p className="page-section-description">
                 Somente usuários com perfil{" "}
-                <strong>Administrador (ou senha de administrador)</strong> podem
+                <strong>Administrador</strong> pode
                 cadastrar e gerenciar usuários.
               </p>
             </div>
@@ -1280,12 +1269,12 @@ const Usuario: React.FC = () => {
               {permissionModalRequirePassword ? (
                 <>
                   <p className="field-hint">
-                    Para prosseguir, digite a senha de administrador.
+                    A senha mestra foi removida por segurança. Use um usuário Administrador cadastrado no Firestore.
                   </p>
 
                   <form onSubmit={handlePermissionPasswordSubmit}>
                     <div className="page-field">
-                      <label>Senha de administrador</label>
+                      <label>Validação administrativa</label>
                       <input
                         type="password"
                         value={overridePassword}

@@ -345,7 +345,7 @@ class BackupViewer(tk.Tk):
         ttk.Combobox(
             filters,
             textvariable=self.type_var,
-            values=("TODOS", "CALÇAMENTO", "ASFALTO"),
+            values=("TODOS", "CALÇAMENTO", "ASFALTO", "HIDROJATO"),
             state="readonly",
             width=14,
         ).pack(side=tk.LEFT, padx=(6, 12))
@@ -515,6 +515,8 @@ class BackupViewer(tk.Tk):
             clauses.append("o.origem = 'calcamento'")
         elif type_filter == "ASFALTO":
             clauses.append("o.origem = 'asfalto'")
+        elif type_filter == "HIDROJATO":
+            clauses.append("o.origem = 'hidrojato'")
         if status_filter != "TODOS":
             clauses.append("o.status = ?")
             params.append(status_filter)

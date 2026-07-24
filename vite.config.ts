@@ -3,6 +3,39 @@ import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 
 export default defineConfig({
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return;
+
+          if (id.includes('/react/') || id.includes('/react-dom/')) {
+            return 'vendor-react';
+          }
+
+          if (id.includes('/firebase/')) {
+            return 'vendor-firebase';
+          }
+
+          if (id.includes('/@supabase/')) {
+            return 'vendor-supabase';
+          }
+
+          if (id.includes('/recharts/') || id.includes('/d3-')) {
+            return 'vendor-charts';
+          }
+
+          if (id.includes('/pdfjs-dist/')) {
+            return 'vendor-pdf';
+          }
+
+          if (id.includes('/jszip/')) {
+            return 'vendor-zip';
+          }
+        },
+      },
+    },
+  },
   plugins: [
     react({
       babel: {
@@ -10,10 +43,15 @@ export default defineConfig({
       },
     }),
     VitePWA({
-      registerType: 'autoUpdate',
-      injectRegister: 'auto', // <<< deixa o plugin injetar o registro do SW
+      registerType: 'prompt',
+      injectRegister: false,
       devOptions: {
-        enabled: true, // PWA também em modo dev (opcional)
+        // Em desenvolvimento o Service Worker fica desligado.
+        // Isso evita erro procurando dev-dist/sw.js e reduz problema de cache no localhost.
+        enabled: false,
+      },
+      workbox: {
+        cleanupOutdatedCaches: true,
       },
       includeAssets: [
         'favicon.svg',

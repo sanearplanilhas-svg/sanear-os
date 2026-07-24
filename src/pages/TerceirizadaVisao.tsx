@@ -11,15 +11,35 @@ import {
   serverTimestamp,
   Timestamp,
 } from "firebase/firestore";
-import { db } from "../lib/firebaseClient";
+import { auth, db } from "../lib/firebaseClient";
 import { supabase } from "../lib/supabaseClient";
+import {
+  compactBlobToZip,
+  extractFirstFileObjectUrlFromZipUrl,
+  isZipReference,
+  ZIP_STORAGE_MIME,
+} from "../lib/storageZip";
 import {
   upsertSanearPause,
   closeSanearPause,
   hasOpenSanearPause,
-  SLA_HORAS_PADRAO,
   MS_POR_HORA,
+  SLA_CONFIGS,
+  getSlaConfigFromOrder,
+  getSlaHorasFromOrder,
 } from "../lib/sla";
+import { registrarAuditoriaOs } from "../lib/auditoria";
+import {
+  formatOrdemStatusLabel,
+  getOrdemStatusCssClass,
+  isOrdemAberta,
+  isOrdemAguardandoSanear,
+  isOrdemCancelada,
+  isOrdemConcluida,
+  normalizeOrdemStatus,
+} from "../lib/status";
+import { salvarAnexoPendente, resumirErroAnexo } from "../lib/anexosPendentes";
+import { AppPagination } from "../components/ui";
 import "./TerceirizadaVisao.css";
 
 // bucket do Supabase onde as OS estão sendo gravadas
@@ -47,9 +67,13 @@ type FirestoreOS = {
   createdAt?: Timestamp | null;
   createdByEmail?: string | null;
   dataExecucao?: Timestamp | null;
+  finalizadoPorArea?: string | null;
+  finalizadoPorEmail?: string | null;
+  finalizadoPorUid?: string | null;
 
-  // SLA (72h) e pausa SANEAR
+  // SLA por serviço e pausa SANEAR
   slaHoras?: number | null;
+  slaServico?: string | null;
   slaPausas?: any[] | null;
   statusAntesAguardandoSanear?: string | null;
 
@@ -59,6 +83,8 @@ type FirestoreOS = {
   ordemServicoPdfDataAnexo?: string | null;
   ordemServicoPdfUrl?: string | null;
   ordemServicoPdfPath?: string | null;
+  ordemServicoPdfCompactado?: boolean | null;
+  ordemServicoPdfMimeTypeOriginal?: string | null;
 
   // Fotos da execução (terceirizada) – usadas na ListaOrdensServico
   fotosExecucao?: any[] | null;
@@ -72,13 +98,13 @@ type LocalPhoto = {
 };
 
 const tipoLabelMap: Record<string, string> = {
-  BURACO_RUA: "Buraco na rua",
-  ASFALTO: "Asfalto",
+  BURACO_RUA: "CALÇAMENTO",
+  ASFALTO: "ASFALTO",
 };
 
 const origemLabelMap: Record<OrigemOS, string> = {
-  buraco: "Buraco na rua",
-  asfalto: "Asfalto",
+  buraco: "CALÇAMENTO",
+  asfalto: "ASFALTO",
 };
 
 function getOrigemLabel(origem: OrigemOS): string {
@@ -95,6 +121,63 @@ function getStorageBasePath(origem: OrigemOS): string {
   return "buraco-rua";
 }
 
+function base64PdfToObjectUrl(base64: string): string {
+  const clean = base64.includes(",") ? base64.split(",").pop() || "" : base64;
+  const binary = atob(clean);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  const blob = new Blob([bytes as unknown as BlobPart], { type: "application/pdf" });
+  return URL.createObjectURL(blob);
+}
+
+function hasAttachedPdf(os: FirestoreOS): boolean {
+  return Boolean(os.ordemServicoPdfUrl || os.ordemServicoPdfPath || os.ordemServicoPdfBase64);
+}
+
+async function resolveAttachedPdfUrl(os: FirestoreOS): Promise<{ url: string; shouldRevoke: boolean } | null> {
+  const rawUrl = os.ordemServicoPdfUrl || null;
+  const rawPath = os.ordemServicoPdfPath || null;
+  const zipped = Boolean(os.ordemServicoPdfCompactado) || isZipReference(rawUrl) || isZipReference(rawPath);
+
+  if (rawUrl) {
+    if (zipped) {
+      const extracted = await extractFirstFileObjectUrlFromZipUrl(
+        rawUrl,
+        os.ordemServicoPdfMimeTypeOriginal || "application/pdf"
+      );
+      return { url: extracted.url, shouldRevoke: true };
+    }
+
+    return { url: rawUrl, shouldRevoke: false };
+  }
+
+  if (rawPath) {
+    const { data } = supabase.storage
+      .from(STORAGE_BUCKET)
+      .getPublicUrl(rawPath);
+
+    if (data.publicUrl) {
+      if (zipped) {
+        const extracted = await extractFirstFileObjectUrlFromZipUrl(
+          data.publicUrl,
+          os.ordemServicoPdfMimeTypeOriginal || "application/pdf"
+        );
+        return { url: extracted.url, shouldRevoke: true };
+      }
+
+      return { url: data.publicUrl, shouldRevoke: false };
+    }
+  }
+
+  if (os.ordemServicoPdfBase64) {
+    return { url: base64PdfToObjectUrl(os.ordemServicoPdfBase64), shouldRevoke: true };
+  }
+
+  return null;
+}
+
 const tipoBadgeClassMap: Record<string, string> = {
   BURACO_RUA: "os-badge os-badge-buraco",
   ASFALTO: "os-badge os-badge-asfalto",
@@ -102,59 +185,31 @@ const tipoBadgeClassMap: Record<string, string> = {
 };
 
 function normalizeStatusValue(status?: string | null): string {
-  return String(status ?? "").trim().toUpperCase();
+  return normalizeOrdemStatus(status);
 }
 
 function isDoneStatus(status?: string | null): boolean {
-  const s = normalizeStatusValue(status);
-  return s === "CONCLUIDA" || s === "CONCLUIDO";
+  return isOrdemConcluida(status);
 }
 
 function isCanceledStatus(status?: string | null): boolean {
-  const s = normalizeStatusValue(status);
-  return s === "CANCELADA" || s === "CANCELADO";
+  return isOrdemCancelada(status);
 }
 
 function isWaitingSanearStatus(status?: string | null): boolean {
-  return normalizeStatusValue(status) === "AGUARDANDO_SANEAR";
+  return isOrdemAguardandoSanear(status);
 }
 
 function isOpenStatus(status?: string | null): boolean {
-  return !isDoneStatus(status) && !isCanceledStatus(status);
+  return isOrdemAberta(status);
 }
 
 function statusClass(status?: string | null): string {
-  const s = normalizeStatusValue(status);
-  if (s === "CONCLUIDA" || s === "CONCLUIDO") {
-    return "os-status-badge os-status-concluida";
-  }
-  if (s === "ANDAMENTO" || s === "EM_ANDAMENTO") {
-    return "os-status-badge os-status-andamento";
-  }
-  if (s === "AGUARDANDO_SANEAR") {
-    return "os-status-badge os-status-aguardando-sanear";
-  }
-  if (s === "CANCELADA" || s === "CANCELADO") {
-    return "os-status-badge os-status-cancelada";
-  }
-  return "os-status-badge os-status-aberta";
+  return getOrdemStatusCssClass(status);
 }
 
 function formatStatusLabel(status?: string | null): string {
-  const s = normalizeStatusValue(status);
-
-  const labels: Record<string, string> = {
-    ABERTA: "ABERTA",
-    ANDAMENTO: "EM ANDAMENTO",
-    EM_ANDAMENTO: "EM ANDAMENTO",
-    AGUARDANDO_SANEAR: "AGUARDANDO SANEAR",
-    CONCLUIDA: "CONCLUÍDA",
-    CONCLUIDO: "CONCLUÍDA",
-    CANCELADA: "CANCELADA",
-    CANCELADO: "CANCELADA",
-  };
-
-  return labels[s] || s.replaceAll("_", " ") || "ABERTA";
+  return formatOrdemStatusLabel(status, { uppercase: true });
 }
 
 function formatCreatedAt(createdAt?: Timestamp | null): string {
@@ -453,6 +508,8 @@ const TerceirizadaVisao: React.FC = () => {
 
   // Filtro por categoria de serviço (tipo)
   const [categoryFilter, setCategoryFilter] = useState<string>("ALL");
+  const [currentPage, setCurrentPage] = useState(1);
+  const PAGE_SIZE = 10;
 
   // OS selecionada no modal
   const [modalOs, setModalOs] = useState<FirestoreOS | null>(null);
@@ -528,6 +585,7 @@ const TerceirizadaVisao: React.FC = () => {
             createdByEmail: raw.createdByEmail ?? null,
             dataExecucao: raw.dataExecucao ?? null,
             slaHoras: raw.slaHoras ?? null,
+            slaServico: raw.slaServico ?? null,
             slaPausas: Array.isArray(raw.slaPausas) ? raw.slaPausas : [],
             statusAntesAguardandoSanear:
               raw.statusAntesAguardandoSanear ?? null,
@@ -541,6 +599,10 @@ const TerceirizadaVisao: React.FC = () => {
               raw.ordemServicoPdfUrl ?? pdfNested?.url ?? null,
             ordemServicoPdfPath:
               raw.ordemServicoPdfPath ?? pdfNested?.path ?? null,
+            ordemServicoPdfCompactado:
+              raw.ordemServicoPdfCompactado ?? pdfNested?.compactado ?? null,
+            ordemServicoPdfMimeTypeOriginal:
+              raw.ordemServicoPdfMimeTypeOriginal ?? pdfNested?.mimeTypeOriginal ?? null,
             fotosExecucao: raw.fotosExecucao ?? null,
           };
         });
@@ -605,6 +667,7 @@ const TerceirizadaVisao: React.FC = () => {
             createdByEmail: raw.createdByEmail ?? null,
             dataExecucao: raw.dataExecucao ?? null,
             slaHoras: raw.slaHoras ?? null,
+            slaServico: raw.slaServico ?? null,
             slaPausas: Array.isArray(raw.slaPausas) ? raw.slaPausas : [],
             statusAntesAguardandoSanear:
               raw.statusAntesAguardandoSanear ?? null,
@@ -618,6 +681,10 @@ const TerceirizadaVisao: React.FC = () => {
               raw.ordemServicoPdfUrl ?? pdfNested?.url ?? null,
             ordemServicoPdfPath:
               raw.ordemServicoPdfPath ?? pdfNested?.path ?? null,
+            ordemServicoPdfCompactado:
+              raw.ordemServicoPdfCompactado ?? pdfNested?.compactado ?? null,
+            ordemServicoPdfMimeTypeOriginal:
+              raw.ordemServicoPdfMimeTypeOriginal ?? pdfNested?.mimeTypeOriginal ?? null,
             fotosExecucao: raw.fotosExecucao ?? null,
           };
         });
@@ -679,10 +746,8 @@ const TerceirizadaVisao: React.FC = () => {
       }
 
       const ageMs = Math.max(0, baseMs - pausadoMs);
-      const slaHoras =
-        typeof os.slaHoras === "number" && os.slaHoras > 0
-          ? os.slaHoras
-          : SLA_HORAS_PADRAO;
+      const slaConfig = getSlaConfigFromOrder(os);
+      const slaHoras = getSlaHorasFromOrder(os);
       const slaMs = slaHoras * MS_POR_HORA;
       const isPaused =
         isWaitingSanearStatus(os.status) || hasOpenSanearPause(os.slaPausas);
@@ -693,6 +758,7 @@ const TerceirizadaVisao: React.FC = () => {
         os,
         ageMs,
         slaHoras,
+        slaConfig,
         slaMs,
         isPaused,
         progressPercent,
@@ -772,16 +838,38 @@ const TerceirizadaVisao: React.FC = () => {
     });
   }, [busca, porStatus, categoryFilter]);
 
+  const totalPages = useMemo(() => {
+    return Math.max(1, Math.ceil(filtradas.length / PAGE_SIZE));
+  }, [filtradas.length, PAGE_SIZE]);
+
+  const paginatedOrdens = useMemo(() => {
+    const start = (currentPage - 1) * PAGE_SIZE;
+    return filtradas.slice(start, start + PAGE_SIZE);
+  }, [filtradas, currentPage, PAGE_SIZE]);
+
+  const paginationStart = filtradas.length === 0 ? 0 : (currentPage - 1) * PAGE_SIZE + 1;
+  const paginationEnd = Math.min(currentPage * PAGE_SIZE, filtradas.length);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [statusTab, categoryFilter, busca]);
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
+
   // Agrupa as filtradas por tipo
   const gruposPorTipo = useMemo(() => {
     const grupos: Record<string, FirestoreOS[]> = {};
-    filtradas.forEach((os) => {
+    paginatedOrdens.forEach((os) => {
       const tipo = os.tipo || "OUTRO";
       if (!grupos[tipo]) grupos[tipo] = [];
       grupos[tipo].push(os);
     });
     return grupos;
-  }, [filtradas]);
+  }, [paginatedOrdens]);
 
   const tiposOrdenados = useMemo(
     () => Object.keys(gruposPorTipo).sort((a, b) => a.localeCompare(b)),
@@ -817,6 +905,35 @@ const TerceirizadaVisao: React.FC = () => {
   const totalCanceladas = ordens.filter((os) =>
     isCanceledStatus(os.status)
   ).length;
+  const totalCalcamento = ordens.filter((os) => (os.tipo || "") === "BURACO_RUA").length;
+  const totalAsfalto = ordens.filter((os) => (os.tipo || "") === "ASFALTO").length;
+
+  async function handleOpenPdf(os: FirestoreOS, event?: React.MouseEvent) {
+    event?.stopPropagation();
+
+    try {
+      const pdf = await resolveAttachedPdfUrl(os);
+      if (!pdf) {
+        setInfoModal({
+          title: "PDF não encontrado",
+          message: "Esta OS não possui PDF anexado.",
+        });
+        return;
+      }
+
+      window.open(pdf.url, "_blank", "noopener,noreferrer");
+
+      if (pdf.shouldRevoke) {
+        window.setTimeout(() => URL.revokeObjectURL(pdf.url), 60_000);
+      }
+    } catch (error) {
+      console.error(error);
+      setInfoModal({
+        title: "Erro ao abrir PDF",
+        message: "Não foi possível abrir o PDF anexado a esta OS.",
+      });
+    }
+  }
 
   function handleOpenOsModal(os: FirestoreOS) {
     setModalOs(os);
@@ -1015,6 +1132,18 @@ async function handleMarcarAguardandoSanear() {
       updatedAt: serverTimestamp(),
     });
 
+    void registrarAuditoriaOs({
+      osId: modalOs.id,
+      origem: modalOs.origem,
+      collectionName,
+      acao: "AGUARDANDO_SANEAR",
+      titulo: "Terceirizada marcou Aguardando SANEAR",
+      descricao,
+      statusAntes,
+      statusDepois: "AGUARDANDO_SANEAR",
+      detalhes: { motivo: aguardandoMotivo },
+    });
+
     setModalOs((prev) =>
       prev
         ? {
@@ -1056,6 +1185,17 @@ async function handleRetomarSanear() {
       statusAntesAguardandoSanear: null,
       slaPausas: pausasFechadas,
       updatedAt: serverTimestamp(),
+    });
+
+    void registrarAuditoriaOs({
+      osId: modalOs.id,
+      origem: modalOs.origem,
+      collectionName,
+      acao: "RETOMADA_SANEAR",
+      titulo: "Terceirizada retomou a OS",
+      descricao: "A OS saiu de Aguardando SANEAR e voltou ao fluxo de execução.",
+      statusAntes: "AGUARDANDO_SANEAR",
+      statusDepois: novoStatus,
     });
 
     setModalOs((prev) =>
@@ -1131,18 +1271,21 @@ async function handleServicoExecutado() {
 
         const id = photo.id || generateLocalId();
 
-        const path = `${basePath}/${modalOs.id}/${subfolder}/${id}-${safeName}`;
-
         const blob = dataUrlToBlob(photo.dataUrl);
+        const compactado = await compactBlobToZip(blob, originalName, blob.type || "image/jpeg");
+        const path = `${basePath}/${modalOs.id}/${subfolder}/${id}-${compactado.zipFileName || `${safeName}.zip`}`;
 
         const { error: uploadError } = await supabase.storage
           .from(STORAGE_BUCKET)
-          .upload(path, blob, { upsert: true });
+          .upload(path, compactado.blob, {
+            upsert: false,
+            contentType: ZIP_STORAGE_MIME,
+          });
 
         if (uploadError) {
           console.error(uploadError);
           throw new Error(
-            `Erro ao enviar foto "${originalName}" para o armazenamento.`
+            `Erro ao enviar foto "${originalName}" compactada em ZIP para o armazenamento.`
           );
         }
 
@@ -1167,6 +1310,13 @@ async function handleServicoExecutado() {
           nomeArquivo: originalName,
           dataAnexoTexto,
           url,
+          path,
+          storagePath: path,
+          arquivoCompactado: true,
+          nomeArquivoZip: compactado.zipFileName,
+          mimeTypeOriginal: compactado.originalMimeType,
+          tamanhoOriginal: compactado.originalSize,
+          tamanhoCompactado: compactado.zipSize,
         });
       }
 
@@ -1177,6 +1327,22 @@ async function handleServicoExecutado() {
         status: "CONCLUIDA",
         dataExecucao: serverTimestamp(),
         fotosExecucao: updatedArray,
+        finalizadoPorArea: "TERCEIRIZADA",
+        finalizadoPorEmail: auth.currentUser?.email?.toLowerCase() ?? null,
+        finalizadoPorUid: auth.currentUser?.uid ?? null,
+        updatedAt: serverTimestamp(),
+      });
+
+      void registrarAuditoriaOs({
+        osId: modalOs.id,
+        origem: modalOs.origem,
+        collectionName,
+        acao: "FINALIZACAO_TERCEIRIZADA",
+        titulo: "OS finalizada pela terceirizada",
+        descricao: `Serviço concluído com ${updatedArray.length} foto(s) de execução.`,
+        statusAntes: modalOs.status ?? null,
+        statusDepois: "CONCLUIDA",
+        detalhes: { fotosExecucao: updatedArray.length, fotosNovas: novosItens.length },
       });
 
       // Limpa fotos em memória para essa OS
@@ -1190,7 +1356,14 @@ async function handleServicoExecutado() {
       // Atualiza o modal com o novo status e fotosExecucao
       setModalOs((prev) =>
         prev && prev.id === modalOs.id
-          ? { ...prev, status: "CONCLUIDA", fotosExecucao: updatedArray }
+          ? {
+              ...prev,
+              status: "CONCLUIDA",
+              fotosExecucao: updatedArray,
+              finalizadoPorArea: "TERCEIRIZADA",
+              finalizadoPorEmail: auth.currentUser?.email?.toLowerCase() ?? null,
+              finalizadoPorUid: auth.currentUser?.uid ?? null,
+            }
           : prev
       );
 
@@ -1198,12 +1371,44 @@ async function handleServicoExecutado() {
         title: "Status atualizado",
         message: "A OS foi marcada como serviço executado (concluída).",
       });
-    } catch (error) {
+    } catch (error: unknown) {
       console.error(error);
+
+      try {
+        const collectionName = getCollectionName(modalOs.origem);
+        const basePath = getStorageBasePath(modalOs.origem);
+        const erroResumo = resumirErroAnexo(error);
+
+        await Promise.all(
+          currentPhotos.map((photo) => {
+            const originalName = photo.name || "foto.jpg";
+            const blob = dataUrlToBlob(photo.dataUrl);
+
+            return salvarAnexoPendente({
+              tipo: "FOTO_EXECUCAO",
+              osId: modalOs.id,
+              collectionName,
+              origem: modalOs.origem.toLocaleUpperCase("pt-BR"),
+              storageBasePath: basePath,
+              storageSubfolder: "fotos-execucao",
+              nomeArquivo: originalName,
+              mimeType: blob.type || "image/jpeg",
+              tamanho: blob.size,
+              criadoPorEmail: auth.currentUser?.email?.toLowerCase() ?? null,
+              observacao: "Foto de execução salva localmente porque o envio ao Supabase falhou.",
+              ultimoErro: erroResumo,
+              arquivo: blob,
+            });
+          })
+        );
+      } catch (queueError) {
+        console.error("Erro ao salvar fotos na fila local", queueError);
+      }
+
       setInfoModal({
-        title: "Erro ao atualizar",
+        title: "Fotos na fila local",
         message:
-          "Não foi possível atualizar o status da OS. Verifique sua conexão e tente novamente.",
+          "Não foi possível concluir o envio agora. As fotos ficaram salvas na fila local deste computador para reenvio posterior.",
       });
     } finally {
       setIsUpdatingStatus(false);
@@ -1248,71 +1453,57 @@ async function handleServicoExecutado() {
   }
 
   return (
-    <section className="page-card terceirizada-page">
+    <section className="page-card terceirizada-page servico-sanear-page terceirizada-executora-page">
       <header className="page-header">
         <div>
-          <h2>Área terceirizada</h2>
-          <p>
-            Aqui a empresa terceirizada acompanha e registra a execução das
-            ordens de serviço abertas pelo setor operacional.
+          <h2>Área da Terceirizada</h2>
+          <p className="page-section-description">
+            Área externa para acompanhamento e finalização das ordens de Calçamento e Asfalto.
+            As ordens de Caminhão Hidrojato permanecem somente na Área de Serviço SANEAR.
           </p>
         </div>
       </header>
 
-      {/* Hero / descrição */}
       <div className="terceirizada-banner">
         <div>
-          <span className="terceirizada-pill">VISÃO DA TERCEIRIZADA</span>
-          <h2>Fila de atendimento unificada</h2>
-          <p className="page-section-description">
-            Todas as OS de buraco e asfalto em um só lugar. Ao concluir o
-            serviço, será solicitada pelo menos uma foto do local atendido.
+          <span className="terceirizada-pill">EXECUÇÃO EXTERNA</span>
+          <h2>Fila da terceirizada</h2>
+          <p>
+            Consulte a OS em PDF, acompanhe o prazo de atendimento e finalize o serviço
+            com até duas fotos de execução para comprovação do encerramento.
           </p>
+
+          <div className="servico-sanear-hero-mini">
+            <span><b>{totalCalcamento}</b> calçamento</span>
+            <span><b>{totalAsfalto}</b> asfalto</span>
+            <span><b>{totalConcluidas}</b> finalizada(s)</span>
+          </div>
         </div>
 
         <div className="terceirizada-highlight">
-          <div className="terceirizada-icon">🚧</div>
-          <p>
-            É de suma importância que as Ordens de Serviço sejam marcadas como
-            “Executada” na mesma data em que a execução for realizada. Pedimos
-            especial atenção para que todos os registros permaneçam corretos e
-            alinhados com a data real da execução. As ordens de Caminhão Hidrojato
-            ficam apenas na Área de Serviço SANEAR.
-          </p>
+          <div className="terceirizada-icon">🤝</div>
+          <div>
+            <span>Fila terceirizada</span>
+            <strong>{totalAbertas} OS aberta(s)</strong>
+          </div>
         </div>
       </div>
 
       <div className="sla-explainer" role="note">
-        <div className="sla-explainer-icon" aria-hidden="true">
-          ⏱
-        </div>
-
+        <div className="sla-explainer-icon" aria-hidden="true">⏱</div>
         <div className="sla-explainer-content">
-          <div className="sla-explainer-title">
-            O que é SLA?
-          </div>
+          <div className="sla-explainer-title">Prazo de atendimento</div>
           <p className="sla-explainer-text">
-            SLA significa <strong>Acordo de Nível de Serviço</strong>. É o prazo
-            máximo definido para atendimento de uma OS. Neste sistema, o prazo
-            padrão é de <strong>{SLA_HORAS_PADRAO} horas úteis</strong>: a
-            contagem ocorre de segunda a sexta, em horas corridas; sábado e
-            domingo não contam. Quando a OS fica em “Aguardando SANEAR”, o
-            relógio do SLA é pausado até a liberação.
+            A terceirizada acompanha o SLA das OS abertas. Agora o prazo é calculado por serviço: <strong>Calçamento {SLA_CONFIGS.CALCAMENTO.horas}h</strong> e <strong>Asfalto {SLA_CONFIGS.ASFALTO.horas}h</strong>, com pausa quando a OS estiver aguardando ação da SANEAR.
           </p>
         </div>
-
-        <button
-          type="button"
-          className="sla-explainer-button"
-          onClick={handleOpenSlaDrawer}
-        >
+        <button type="button" className="sla-explainer-button" onClick={handleOpenSlaDrawer}>
           Ver situação do SLA
         </button>
       </div>
 
-      {/* KPI cards rápidos */}
       <div className="os-kpi-row">
-        <div className="os-kpi-card">
+        <div className="os-kpi-card servico-sanear-kpi is-open">
           <div>
             <div className="os-kpi-label">OS em aberto</div>
             <div className="os-kpi-value">{totalAbertas}</div>
@@ -1320,33 +1511,26 @@ async function handleServicoExecutado() {
           <span className="os-kpi-pill">Na fila de execução</span>
         </div>
 
-        <div className="os-kpi-card">
+        <div className="os-kpi-card servico-sanear-kpi is-done">
           <div>
             <div className="os-kpi-label">OS concluídas</div>
             <div className="os-kpi-value">{totalConcluidas}</div>
           </div>
-          <span className="os-kpi-pill os-kpi-pill-success">
-            Serviço finalizado
-          </span>
+          <span className="os-kpi-pill os-kpi-pill-success">Finalizadas</span>
         </div>
 
-        <div className="os-kpi-card">
+        <div className="os-kpi-card servico-sanear-kpi is-total">
           <div>
             <div className="os-kpi-label">Total de OS</div>
             <div className="os-kpi-value">{ordens.length}</div>
           </div>
           <span className="os-kpi-pill os-kpi-pill-neutral">
-            {totalCanceladas > 0
-              ? `${totalCanceladas} cancelada(s)`
-              : "Atualizado em tempo real"}
+            {totalCanceladas > 0 ? `${totalCanceladas} cancelada(s)` : "Atualizado em tempo real"}
           </span>
         </div>
 
-
         <div
-          className={`os-kpi-card os-kpi-card-sla ${
-            slaSnapshot.overdue.length > 0 ? "is-danger" : "is-ok"
-          }`}
+          className={`os-kpi-card os-kpi-card-sla ${slaSnapshot.overdue.length > 0 ? "is-danger" : "is-ok"}`}
           role="button"
           tabIndex={0}
           onClick={handleOpenSlaDrawer}
@@ -1356,37 +1540,23 @@ async function handleServicoExecutado() {
               handleOpenSlaDrawer();
             }
           }}
-          title="Abrir o acompanhamento do prazo de atendimento"
+          title="Abrir acompanhamento do SLA"
         >
           <div>
-            <div className="os-kpi-label">
-              Prazo de atendimento (SLA)
-            </div>
+            <div className="os-kpi-label">SLA em atraso</div>
             <div className="os-kpi-value">{slaSnapshot.overdue.length}</div>
             <div className="sla-kpi-breakdown">
               <span>{slaSnapshot.nearDue.length} em atenção</span>
               <span>{slaSnapshot.paused.length} pausada(s)</span>
             </div>
           </div>
-
-          <span
-            className={`os-kpi-pill ${
-              slaSnapshot.overdue.length > 0
-                ? "os-kpi-pill-danger"
-                : "os-kpi-pill-success"
-            }`}
-          >
-            {slaSnapshot.overdue.length > 0
-              ? `${slaSnapshot.overdue.length} atrasada(s)`
-              : "Dentro do prazo"}
+          <span className={`os-kpi-pill ${slaSnapshot.overdue.length > 0 ? "os-kpi-pill-danger" : "os-kpi-pill-success"}`}>
+            {slaSnapshot.overdue.length > 0 ? `${slaSnapshot.overdue.length} atrasada(s)` : "Dentro do prazo"}
           </span>
         </div>
-
       </div>
 
-      {/* FILTROS + BUSCA */}
       <div className="os-toolbar">
-        {/* Linha 1 – abas de status */}
         <div className="os-status-tabs" style={{ marginBottom: "0.5rem" }}>
           <button
             type="button"
@@ -1420,16 +1590,7 @@ async function handleServicoExecutado() {
           </button>
         </div>
 
-        {/* Linha 2 – submenu (tipos) + barra de busca */}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: "0.75rem",
-            flexWrap: "wrap",
-          }}
-        >
+        <div className="terceirizada-filter-row">
           {tiposCategoriaOrdenados.length > 0 && (
             <div className="os-category-tabs">
               <button
@@ -1437,19 +1598,11 @@ async function handleServicoExecutado() {
                 className={`os-category-tab ${categoryFilter === "ALL" ? "is-active" : ""}`}
                 onClick={() => setCategoryFilter("ALL")}
               >
-                Todas ({porStatus.length})
+                TODOS OS SERVIÇOS ({porStatus.length})
               </button>
 
               {tiposCategoriaOrdenados.map((tipo) => {
-                let label: string;
-                if (tipo === "ASFALTO") {
-                  label = "asfalto";
-                } else if (tipo === "BURACO_RUA") {
-                  label = "Buraco na rua";
-                } else {
-                  label = tipoLabelMap[tipo] || tipo || "Outro";
-                }
-
+                const label = tipoLabelMap[tipo] || tipo || "OUTRO";
                 const count = countsPorTipo[tipo];
 
                 return (
@@ -1470,7 +1623,7 @@ async function handleServicoExecutado() {
             <input
               className="os-search-input"
               type="text"
-              placeholder="Buscar por protocolo, OS, bairro, rua ou data (dd/mm/aaaa)..."
+              placeholder="Buscar por protocolo, OS, bairro, rua ou data..."
               value={busca}
               onChange={(e) => setBusca(e.target.value)}
             />
@@ -1478,82 +1631,137 @@ async function handleServicoExecutado() {
         </div>
       </div>
 
-      {/* LISTAGEM PRINCIPAL */}
       <div className="os-main">
+        {loading && <div className="os-empty">Carregando ordens da terceirizada...</div>}
+
         {!loading && filtradas.length === 0 && (
-          <div className="os-empty">
-            Nenhuma ordem encontrada para os filtros atuais.
-          </div>
+          <div className="os-empty">Nenhuma ordem encontrada para os filtros atuais.</div>
         )}
 
-        {tiposOrdenados.map((tipo) => {
-          const lista = gruposPorTipo[tipo];
-          const label = tipoLabelMap[tipo] || tipo || "Outro";
-          const badgeClass =
-            tipoBadgeClassMap[tipo] || "os-badge os-badge-outro";
+        {!loading && filtradas.length > 0 && (
+          <section className="os-group-section">
+            <div className="os-group-header">
+              <div>
+                <span className="os-badge os-badge-terceirizada">SERVIÇOS DA TERCEIRIZADA</span>
+              </div>
+              <span className="os-group-count">
+                {filtradas.length} OS {statusTab === "OPEN" ? "em aberto" : statusTab === "DONE" ? "concluída(s)" : "encontrada(s)"}
+              </span>
+            </div>
 
-          return (
-            <section key={tipo} className="os-group-section">
-              <div className="os-group-header">
-                <div>
-                  <span className={badgeClass}>{label}</span>
+            <AppPagination
+              currentPage={currentPage}
+              totalPages={totalPages}
+              totalItems={filtradas.length}
+              pageStart={paginationStart}
+              pageEnd={paginationEnd}
+              onPageChange={setCurrentPage}
+              variant="top"
+              label="OS"
+            />
+
+            {tiposOrdenados.map((tipo) => {
+              const lista = gruposPorTipo[tipo];
+              const label = tipoLabelMap[tipo] || tipo || "OUTRO";
+              const badgeClass = tipoBadgeClassMap[tipo] || "os-badge os-badge-outro";
+
+              return (
+                <div key={tipo} className="terceirizada-page-group">
+                  <div className="os-group-header os-group-header-sub">
+                    <span className={badgeClass}>{label}</span>
+                    <span className="os-group-count">{lista.length} nesta página</span>
+                  </div>
+
+                  <div className="os-list">
+                    {lista.map((os) => (
+                      <article
+                        key={os.id}
+                        className={`os-card servico-sanear-os-card terceirizada-os-card ${isDoneStatus(os.status) ? "is-done" : "is-open"}`}
+                        onClick={() => handleOpenOsModal(os)}
+                        role="button"
+                        tabIndex={0}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            handleOpenOsModal(os);
+                          }
+                        }}
+                      >
+                        <div className="os-card-header servico-sanear-card-header">
+                          <div>
+                            <span className="servico-sanear-card-eyebrow">{label}</span>
+                            <h3>{os.ordemServico || os.protocolo || "OS sem número"}</h3>
+                            <p className="os-card-address">
+                              {[
+                                os.rua,
+                                os.numero ? "nº " + os.numero : "",
+                                os.bairro ? "– " + os.bairro : "",
+                              ].filter(Boolean).join(" ") || "Endereço não informado"}
+                            </p>
+                          </div>
+
+                          <div className="servico-sanear-status-area">
+                            <span className={statusClass(os.status)}>{formatStatusLabel(os.status)}</span>
+                            {hasAttachedPdf(os) ? (
+                              <span className="servico-sanear-pdf-chip">PDF anexado</span>
+                            ) : (
+                              <span className="servico-sanear-pdf-chip is-missing">Sem PDF</span>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="servico-sanear-card-info">
+                          <div>
+                            <span>Criada em</span>
+                            <strong>{formatCreatedAt(os.createdAt)}</strong>
+                          </div>
+                          <div>
+                            <span>Execução</span>
+                            <strong>{formatCreatedAt(os.dataExecucao)}</strong>
+                          </div>
+                          <div>
+                            <span>Fotos</span>
+                            <strong>{Array.isArray(os.fotosExecucao) ? os.fotosExecucao.length : 0}/{MAX_FOTOS_EXECUCAO}</strong>
+                          </div>
+                        </div>
+
+                        {os.createdByEmail && (
+                          <div className="servico-sanear-created-by">Responsável pelo cadastro: {os.createdByEmail}</div>
+                        )}
+
+                        <div className="servico-sanear-card-actions">
+                          <button type="button" className="btn-secondary" onClick={(event) => handleOpenPdf(os, event)}>
+                            Abrir PDF
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-primary"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              handleOpenOsModal(os);
+                            }}
+                          >
+                            Ver dados
+                          </button>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
                 </div>
-                <span className="os-group-count">
-                  {lista.length} OS{" "}
-                  {statusTab === "OPEN"
-                    ? "em aberto"
-                    : statusTab === "DONE"
-                    ? "concluída(s)"
-                    : "encontrada(s)"}
-                </span>
-              </div>
+              );
+            })}
 
-              <div className="os-list">
-                {lista.map((os) => (
-                  <article
-                    key={os.id}
-                    className="os-card"
-                    onClick={() => handleOpenOsModal(os)}
-                    role="button"
-                  >
-                    <div className="os-card-header">
-                      <div>
-                        <h3>
-                          {os.protocolo ||
-                            os.ordemServico ||
-                            "Sem identificação"}
-                        </h3>
-                        <p className="os-card-address">
-                          {[
-                            os.rua,
-                            os.numero ? "nº " + os.numero : "",
-                            os.bairro ? " – " + os.bairro : "",
-                          ]
-                            .filter(Boolean)
-                            .join(" ") || "Endereço não informado"}
-                        </p>
-                      </div>
-                      <div>
-                        <span className={statusClass(os.status)}>
-                          {formatStatusLabel(os.status)}
-                        </span>
-                      </div>
-                    </div>
-
-                    <div className="os-card-meta">
-                      <span>Criado em {formatCreatedAt(os.createdAt)}</span>
-                      {os.createdByEmail && (
-                        <span>Por {os.createdByEmail}</span>
-                      )}
-                    </div>
-                  </article>
-                ))}
-              </div>
-            </section>
-          );
-        })}
+            <AppPagination
+              currentPage={currentPage}
+              totalPages={totalPages}
+              totalItems={filtradas.length}
+              onPageChange={setCurrentPage}
+              variant="bottom"
+              label="OS"
+            />
+          </section>
+        )}
       </div>
-
 
       {/* DRAWER – acompanhamento do prazo de atendimento */}
       {slaOpen && (
@@ -1589,10 +1797,7 @@ async function handleServicoExecutado() {
                 <div>
                   <strong>SLA é o prazo máximo para atender uma OS.</strong>
                   <p>
-                    O prazo padrão é de {SLA_HORAS_PADRAO} horas úteis. A
-                    contagem ocorre de segunda a sexta, em horas corridas;
-                    sábado e domingo não contam. Quando a OS está em
-                    “Aguardando SANEAR”, o relógio fica pausado.
+                    O prazo é definido conforme o serviço: Calçamento {SLA_CONFIGS.CALCAMENTO.horas}h e Asfalto {SLA_CONFIGS.ASFALTO.horas}h. A contagem ocorre de segunda a sexta, em horas corridas; sábado e domingo não contam. Quando a OS está em “Aguardando SANEAR”, o relógio fica pausado.
                   </p>
                 </div>
               </div>
@@ -1640,6 +1845,7 @@ async function handleServicoExecutado() {
                         overdueByMs,
                         progressPercent,
                         slaHoras,
+                        slaConfig,
                       }) => {
                         const ident =
                           os.ordemServico || os.protocolo || os.id;
@@ -1675,7 +1881,7 @@ async function handleServicoExecutado() {
                                 </div>
                                 <div className="sla-item-limit">
                                   {formatBusinessDuration(ageMs)} consumidas de{" "}
-                                  {slaHoras}h
+                                  {slaHoras}h • {slaConfig.label}
                                 </div>
                               </div>
                             </div>
@@ -1711,6 +1917,7 @@ async function handleServicoExecutado() {
                         remainingMs,
                         progressPercent,
                         slaHoras,
+                        slaConfig,
                       }) => {
                         const ident =
                           os.ordemServico || os.protocolo || os.id;
@@ -1745,7 +1952,7 @@ async function handleServicoExecutado() {
                                 </div>
                                 <div className="sla-item-limit">
                                   {formatBusinessDuration(ageMs)} consumidas de{" "}
-                                  {slaHoras}h
+                                  {slaHoras}h • {slaConfig.label}
                                 </div>
                               </div>
                             </div>
@@ -1961,98 +2168,93 @@ async function handleServicoExecutado() {
                 />
               </div>
 
-              <div className="page-section">
-                <h3>Fotos do serviço executado</h3>
-                <p className="page-section-description">
-                  Para concluir a OS, anexe uma ou duas fotos do serviço
-                  executado. Não é permitido anexar mais de duas imagens.
-                </p>
-
-                <div className="execution-photo-limit">
-                  <span>Fotos anexadas</span>
-                  <strong>
-                    {totalFotosExecucao}/{MAX_FOTOS_EXECUCAO}
-                  </strong>
-                </div>
-
-                {currentPhotos.length > 0 ? (
-                  <div className="page-photos-block">
-                    <div className="photo-preview-grid">
-                      {currentPhotos.map((p) => (
-                        <div key={p.id} className="photo-preview-item">
-                          <img src={p.dataUrl} alt={p.name} />
-                          <span className="photo-timestamp">
-                            {p.createdAt}
-                          </span>
-                          <button
-                            type="button"
-                            className="btn-secondary"
-                            style={{
-                              position: "absolute",
-                              top: "0.3rem",
-                              right: "0.3rem",
-                              padding: "0.1rem 0.5rem",
-                              fontSize: "0.7rem",
-                            }}
-                            onClick={() => handleRemoveModalPhoto(p.id)}
-                          >
-                            Excluir
-                          </button>
-                        </div>
-                      ))}
+              {isDoneStatus(modalOs.status) ? (
+                <div className="page-section terceirizada-execution-summary">
+                  <h3>Resumo da execução</h3>
+                  <p className="page-section-description">
+                    Esta OS já foi finalizada pela terceirizada. Para conferir as imagens, use a coluna Fotos na listagem principal.
+                  </p>
+                  <div className="servico-sanear-summary-grid">
+                    <div>
+                      <span>Status</span>
+                      <strong>{formatStatusLabel(modalOs.status)}</strong>
+                    </div>
+                    <div>
+                      <span>Finalizada em</span>
+                      <strong>{formatCreatedAt(modalOs.dataExecucao)}</strong>
+                    </div>
+                    <div>
+                      <span>Fotos registradas</span>
+                      <strong>{fotosExecucaoJaSalvas}/{MAX_FOTOS_EXECUCAO}</strong>
                     </div>
                   </div>
-                ) : (
-                  <p className="photo-hint">
-                    Nenhuma foto anexada ainda para esta OS.
-                  </p>
-                )}
-
-                <div
-                  className="page-photos-block"
-                  style={{ marginTop: "0.6rem" }}
-                >
-                  <div className="photo-upload">
-                    <label
-                      htmlFor="upload-fotos-modal"
-                      className={`btn-secondary ${
-                        vagasFotosExecucao === 0 ? "is-disabled" : ""
-                      }`}
-                      style={{
-                        display: "inline-flex",
-                        alignItems: "center",
-                        gap: "0.4rem",
-                        cursor:
-                          vagasFotosExecucao === 0 ? "not-allowed" : "pointer",
-                      }}
-                      aria-disabled={vagasFotosExecucao === 0}
-                    >
-                      {vagasFotosExecucao === 0
-                        ? "✓ Limite de 2 fotos atingido"
-                        : `📷 Adicionar foto${
-                            vagasFotosExecucao > 1 ? "s" : ""
-                          } (${vagasFotosExecucao} restante${
-                            vagasFotosExecucao > 1 ? "s" : ""
-                          })`}
-                    </label>
-                    <input
-                      id="upload-fotos-modal"
-                      type="file"
-                      accept="image/jpeg,image/png,image/webp,image/jpg"
-                      multiple
-                      disabled={vagasFotosExecucao === 0}
-                      onChange={handleModalFilesChange}
-                      style={{ display: "none" }}
-                    />
-                    {showPhotoUploader && totalFotosExecucao === 0 && (
-                      <p className="photo-hint">
-                        Anexe uma ou duas fotos do serviço executado para
-                        concluir esta OS.
-                      </p>
-                    )}
-                  </div>
                 </div>
-              </div>
+              ) : (
+                <div className="page-section">
+                  <h3>Fotos do serviço executado</h3>
+                  <p className="page-section-description">
+                    Para concluir a OS, anexe uma ou duas fotos do serviço executado.
+                    Não é permitido anexar mais de duas imagens.
+                  </p>
+
+                  <div className="execution-photo-limit">
+                    <span>Fotos anexadas</span>
+                    <strong>{totalFotosExecucao}/{MAX_FOTOS_EXECUCAO}</strong>
+                  </div>
+
+                  {currentPhotos.length > 0 ? (
+                    <div className="page-photos-block">
+                      <div className="photo-preview-grid">
+                        {currentPhotos.map((p) => (
+                          <div key={p.id} className="photo-preview-item">
+                            <img src={p.dataUrl} alt={p.name} />
+                            <span className="photo-timestamp">{p.createdAt}</span>
+                            <button
+                              type="button"
+                              className="btn-danger"
+                              style={{
+                                position: "absolute",
+                                top: "0.3rem",
+                                right: "0.3rem",
+                                padding: "0.1rem 0.5rem",
+                                fontSize: "0.7rem",
+                              }}
+                              onClick={() => handleRemoveModalPhoto(p.id)}
+                            >
+                              Excluir
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="photo-hint">Nenhuma foto anexada ainda para esta OS.</p>
+                  )}
+
+                  {vagasFotosExecucao > 0 && (
+                    <div className="page-photos-block" style={{ marginTop: "0.6rem" }}>
+                      <div className="photo-upload">
+                        <label htmlFor="upload-fotos-modal" className="btn-secondary">
+                          📷 Adicionar foto{vagasFotosExecucao > 1 ? "s" : ""} ({vagasFotosExecucao} restante{vagasFotosExecucao > 1 ? "s" : ""})
+                        </label>
+                        <input
+                          id="upload-fotos-modal"
+                          type="file"
+                          accept="image/jpeg,image/png,image/webp,image/jpg"
+                          multiple
+                          onChange={handleModalFilesChange}
+                          style={{ display: "none" }}
+                        />
+                        {showPhotoUploader && totalFotosExecucao === 0 && (
+                          <p className="photo-hint">
+                            Anexe uma ou duas fotos do serviço executado para concluir esta OS.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="modal-footer">
@@ -2063,7 +2265,11 @@ async function handleServicoExecutado() {
               >
                 Imprimir
               </button>
-              {normalizeStatus(modalOs.status) === "AGUARDANDO_SANEAR" ? (
+              {isDoneStatus(modalOs.status) ? (
+                <button type="button" className="btn-primary" disabled>
+                  Serviço já finalizado
+                </button>
+              ) : normalizeStatus(modalOs.status) === "AGUARDANDO_SANEAR" ? (
                 <button
                   type="button"
                   className="btn-primary"
@@ -2073,24 +2279,25 @@ async function handleServicoExecutado() {
                   {isUpdatingStatus ? "Atualizando..." : "SANEAR liberou (retomar)"}
                 </button>
               ) : (
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  onClick={() => setAguardandoSanearOpen(true)}
-                  disabled={isUpdatingStatus}
-                >
-                  Aguardando SANEAR
-                </button>
+                <>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => setAguardandoSanearOpen(true)}
+                    disabled={isUpdatingStatus}
+                  >
+                    Aguardando SANEAR
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    onClick={handleServicoExecutado}
+                    disabled={isUpdatingStatus}
+                  >
+                    {isUpdatingStatus ? "Atualizando..." : "Finalizar serviço"}
+                  </button>
+                </>
               )}
-
-              <button
-                type="button"
-                className="btn-secondary"
-                onClick={handleServicoExecutado}
-                disabled={isUpdatingStatus}
-              >
-                {isUpdatingStatus ? "Atualizando..." : "Serviço executado"}
-              </button>
             </div>
           </div>
         </div>

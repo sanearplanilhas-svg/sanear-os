@@ -1,0 +1,21 @@
+-- MODELO MAIS SEGURO PARA PRODUÇÃO FUTURA
+--
+-- Não execute este arquivo agora se o sistema ainda faz upload/delete direto pelo frontend.
+-- Ele serve como referência para a próxima evolução: API/Cloud Function protegida.
+--
+-- Ideia:
+-- - Frontend autentica no Firebase.
+-- - Frontend chama uma API/Cloud Function.
+-- - A API valida o role no Firestore.
+-- - A API usa SUPABASE_SERVICE_ROLE_KEY no servidor.
+-- - A chave service_role nunca fica no navegador.
+--
+-- Quando esse modelo for adotado, o bucket pode deixar de aceitar INSERT/DELETE para anon.
+
+-- Exemplo conceitual:
+-- drop policy if exists "SANEAR anon pode enviar arquivos operacionais" on storage.objects;
+-- drop policy if exists "SANEAR anon pode excluir arquivos operacionais" on storage.objects;
+--
+-- Manter SELECT público ou migrar para URLs assinadas, dependendo da decisão:
+-- 1. Bucket público + select público: mais simples.
+-- 2. Bucket privado + signed URLs: mais seguro.

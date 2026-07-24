@@ -23,7 +23,7 @@ service cloud.firestore {
     }
 
     function ehAdm() {
-      return papel() == "adm";
+      return papel() == "adm" || papel() == "admin";
     }
 
     function ehDiretor() {
@@ -50,16 +50,30 @@ service cloud.firestore {
       return request.resource.data.createdByUid == request.auth.uid;
     }
 
+    function camposOperacionaisTerceirizada() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+        "status",
+        "dataExecucao",
+        "fotosExecucao",
+        "slaPausas",
+        "statusAntesAguardandoSanear",
+        "updatedAt",
+        "finalizadoPorArea",
+        "finalizadoPorEmail",
+        "finalizadoPorUid"
+      ]);
+    }
+
+    function atualizacaoTerceirizadaPermitida() {
+      return ehTerceirizada() && camposOperacionaisTerceirizada();
+    }
+
     match /usuarios_sistema/{userId} {
       allow read: if estaLogado() &&
         (request.auth.uid == userId || ehAdm());
 
-      // O primeiro administrador deve ser criado manualmente pelo Console Firebase.
-      // Depois disso, somente um administrador pode cadastrar novos perfis.
       allow create: if ehAdm();
 
-      // O administrador pode alterar perfis. O próprio usuário só pode atualizar
-      // dados pessoais sem mudar UID, e-mail ou papel de acesso.
       allow update: if ehAdm() || (
         estaLogado() &&
         request.auth.uid == userId &&
@@ -71,13 +85,18 @@ service cloud.firestore {
       allow delete: if ehAdm() && request.auth.uid != userId;
     }
 
+    match /notificacoes_usuario/{userId} {
+      allow read, create, update: if estaLogado() && request.auth.uid == userId;
+      allow delete: if ehAdm() || (estaLogado() && request.auth.uid == userId);
+    }
+
     match /ordens_servico/{ordemId} {
       allow read: if estaLogado();
 
       allow create: if podeCadastrarOrdem() &&
         criadorInformadoCorretamente();
 
-      allow update: if ehAdm() || ehDiretor() || ehTerceirizada() ||
+      allow update: if ehAdm() || ehDiretor() || atualizacaoTerceirizadaPermitida() ||
         (ehOperador() && ehCriadorDaOrdem());
 
       allow delete: if ehAdm();
@@ -89,15 +108,13 @@ service cloud.firestore {
       allow create: if podeCadastrarOrdem() &&
         criadorInformadoCorretamente();
 
-      allow update: if ehAdm() || ehDiretor() || ehTerceirizada() ||
+      allow update: if ehAdm() || ehDiretor() || atualizacaoTerceirizadaPermitida() ||
         (ehOperador() && ehCriadorDaOrdem());
 
       allow delete: if ehAdm();
     }
 
     match /ordensHidrojato/{ordemId} {
-      // Hidrojato é serviço interno da SANEAR.
-      // A terceirizada não lê, não lista e não finaliza estas OS.
       allow read: if ehAdm() || ehDiretor() || ehOperador();
 
       allow create: if podeCadastrarOrdem() &&

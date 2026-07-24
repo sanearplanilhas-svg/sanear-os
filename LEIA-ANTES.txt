@@ -1,0 +1,14 @@
+PATCH NIVEL 5 V27
+
+Este pacote substitui somente:
+  e2e/level5-fotos-finalizacao.spec.ts
+
+Objetivo:
+- Remover a validacao final que entrava como admin na Lista.
+- Validar a finalizacao pelo Firestore/Supabase.
+- Evitar timeout no final do teste.
+
+Depois de copiar, confirme com:
+Select-String -Path .\e2e\level5-fotos-finalizacao.spec.ts -Pattern "E2E NIVEL 5 ESTAVEL V27|expectFinishedInAdminList|valida na Lista|valida somente no Firestore"
+
+Nao deve aparecer expectFinishedInAdminList.

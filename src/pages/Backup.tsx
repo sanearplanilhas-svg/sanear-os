@@ -11,14 +11,15 @@ import {
 import { PDFDocument, StandardFonts, rgb, type PDFFont } from "pdf-lib";
 import { auth, db } from "../lib/firebaseClient";
 import { supabase } from "../lib/supabaseClient";
+import { isOrdemConcluida, normalizeOrdemStatus } from "../lib/status";
 import "./Backup.css";
 
 const STORAGE_BUCKET = "os-arquivos";
 const BACKUP_SCHEMA_VERSION = 1;
 
-type CollectionName = "ordens_servico" | "ordensServico";
-type Origem = "calcamento" | "asfalto";
-type TipoFiltro = "TODOS" | "CALCAMENTO" | "ASFALTO";
+type CollectionName = "ordens_servico" | "ordensServico" | "ordensHidrojato";
+type Origem = "calcamento" | "asfalto" | "hidrojato";
+type TipoFiltro = "TODOS" | "CALCAMENTO" | "ASFALTO" | "HIDROJATO";
 
 type PhotoKind = "abertura" | "execucao";
 
@@ -29,6 +30,8 @@ type PhotoReference = {
   url: string;
   attachedAt: string | null;
   storagePath: string | null;
+  arquivoCompactado: boolean;
+  mimeTypeOriginal: string | null;
 };
 
 type CloudOrder = {
@@ -107,12 +110,11 @@ type DeletionResult = {
 };
 
 function normalizeStatus(value: unknown): string {
-  return String(value ?? "").trim().toUpperCase();
+  return normalizeOrdemStatus(value);
 }
 
 function isFinalStatus(value: unknown): boolean {
-  const status = normalizeStatus(value);
-  return status === "CONCLUIDA" || status === "CONCLUIDO";
+  return isOrdemConcluida(value);
 }
 
 function stringOrNull(value: unknown): string | null {
@@ -234,6 +236,8 @@ function normalizePhotos(raw: unknown, kind: PhotoKind): PhotoReference[] {
           url,
           attachedAt: null,
           storagePath: extractStoragePath(url),
+          arquivoCompactado: url.split("?")[0].toLowerCase().endsWith(".zip"),
+          mimeTypeOriginal: null,
         };
       }
 
@@ -252,7 +256,9 @@ function normalizePhotos(raw: unknown, kind: PhotoKind): PhotoReference[] {
         attachedAt: stringOrNull(
           data.dataAnexoTexto ?? data.createdAt ?? data.timestamp
         ),
-        storagePath: extractStoragePath(url),
+        storagePath: stringOrNull(data.storagePath ?? data.path) ?? extractStoragePath(url),
+        arquivoCompactado: Boolean(data.arquivoCompactado ?? data.compactadoZip ?? data.zip) || url.split("?")[0].toLowerCase().endsWith(".zip"),
+        mimeTypeOriginal: stringOrNull(data.mimeTypeOriginal),
       };
     })
     .filter((item): item is PhotoReference => item !== null);
@@ -266,7 +272,11 @@ function mapDocument(
   if (!isFinalStatus(raw.status)) return null;
 
   const origem: Origem =
-    sourceCollection === "ordensServico" ? "asfalto" : "calcamento";
+    sourceCollection === "ordensHidrojato"
+      ? "hidrojato"
+      : sourceCollection === "ordensServico"
+      ? "asfalto"
+      : "calcamento";
   const createdAtIso = timestampToIso(raw.createdAt);
   const updatedAtIso = timestampToIso(raw.updatedAt);
   const dataExecucaoIso = timestampToIso(raw.dataExecucao);
@@ -279,7 +289,11 @@ function mapDocument(
     status: normalizeStatus(raw.status),
     tipo:
       stringOrNull(raw.tipo) ??
-      (origem === "asfalto" ? "ASFALTO" : "BURACO_RUA"),
+      origem === "hidrojato"
+        ? "HIDROJATO"
+        : origem === "asfalto"
+        ? "ASFALTO"
+        : "BURACO_RUA",
     protocolo: stringOrNull(raw.protocolo),
     ordemServico: stringOrNull(raw.ordemServico),
     bairro: stringOrNull(raw.bairro),
@@ -515,7 +529,11 @@ async function buildPdf(
       color: rgb(1, 1, 1),
     });
     page.drawText(
-      order.origem === "asfalto" ? "ORDEM DE SERVICO - ASFALTO" : "ORDEM DE SERVICO - CALCAMENTO",
+      order.origem === "hidrojato"
+        ? "ORDEM DE SERVICO - CAMINHAO HIDROJATO"
+        : order.origem === "asfalto"
+        ? "ORDEM DE SERVICO - ASFALTO"
+        : "ORDEM DE SERVICO - CALCAMENTO",
       {
         x: margin,
         y: height - 60,
@@ -831,7 +849,15 @@ const Backup: React.FC = () => {
     [orders]
   );
 
-  const asfaltoCount = orders.length - calcamentoCount;
+  const asfaltoCount = useMemo(
+    () => orders.filter((order) => order.origem === "asfalto").length,
+    [orders]
+  );
+
+  const hidrojatoCount = useMemo(
+    () => orders.filter((order) => order.origem === "hidrojato").length,
+    [orders]
+  );
 
   const reviewedOrders = useMemo(() => {
     const term = reviewSearch.trim().toLocaleLowerCase("pt-BR");
@@ -839,7 +865,11 @@ const Backup: React.FC = () => {
 
     return orders.filter((order) =>
       [
-        order.origem === "asfalto" ? "asfalto" : "calçamento",
+        order.origem === "hidrojato"
+          ? "hidrojato"
+          : order.origem === "asfalto"
+          ? "asfalto"
+          : "calçamento",
         order.protocolo,
         order.ordemServico,
         order.bairro,
@@ -869,9 +899,10 @@ const Backup: React.FC = () => {
         throw new Error("A data inicial não pode ser maior que a data final.");
       }
 
-      const [calcamentoSnapshot, asfaltoSnapshot] = await Promise.all([
+      const [calcamentoSnapshot, asfaltoSnapshot, hidrojatoSnapshot] = await Promise.all([
         getDocs(collection(db, "ordens_servico")),
         getDocs(collection(db, "ordensServico")),
+        getDocs(collection(db, "ordensHidrojato")),
       ]);
 
       const all: CloudOrder[] = [
@@ -883,6 +914,9 @@ const Backup: React.FC = () => {
         ...asfaltoSnapshot.docs
           .map((item) => mapDocument("ordensServico", item.id, item.data()))
           .filter((item): item is CloudOrder => item !== null),
+        ...hidrojatoSnapshot.docs
+          .map((item) => mapDocument("ordensHidrojato", item.id, item.data()))
+          .filter((item): item is CloudOrder => item !== null),
       ];
 
       const filtered = all
@@ -891,6 +925,9 @@ const Backup: React.FC = () => {
             return false;
           }
           if (typeFilter === "ASFALTO" && order.origem !== "asfalto") {
+            return false;
+          }
+          if (typeFilter === "HIDROJATO" && order.origem !== "hidrojato") {
             return false;
           }
 
@@ -949,11 +986,27 @@ const Backup: React.FC = () => {
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
+      let bytes = await response.arrayBuffer();
+      let mimeType = response.headers.get("content-type");
+
+      const contentLooksZipped =
+        photo.arquivoCompactado ||
+        photo.url.split("?")[0].toLowerCase().endsWith(".zip") ||
+        (mimeType ?? "").toLowerCase().includes("zip");
+
+      if (contentLooksZipped) {
+        const zipFile = await JSZip.loadAsync(bytes);
+        const innerFile = Object.values(zipFile.files).find((file) => !file.dir);
+        if (!innerFile) throw new Error("ZIP sem fotografia interna");
+        bytes = await innerFile.async("arraybuffer");
+        mimeType = photo.mimeTypeOriginal ?? mimeType;
+      }
+
       return {
         ...photo,
         zipPath,
-        bytes: await response.arrayBuffer(),
-        mimeType: response.headers.get("content-type"),
+        bytes,
+        mimeType,
         downloadError: null,
       };
     } catch (error) {
@@ -1028,7 +1081,7 @@ const Backup: React.FC = () => {
           (total, order) => total + order.photos.length,
           0
         ),
-        sourceCollections: ["ordens_servico", "ordensServico"],
+        sourceCollections: ["ordens_servico", "ordensServico", "ordensHidrojato"],
         filter: {
           startDate: startDate || null,
           endDate: endDate || null,
@@ -1373,9 +1426,10 @@ const Backup: React.FC = () => {
               }
               disabled={analyzing || generating || deleting}
             >
-              <option value="TODOS">Calçamento e Asfalto</option>
+              <option value="TODOS">Todos os serviços internos</option>
               <option value="CALCAMENTO">Somente Calçamento</option>
               <option value="ASFALTO">Somente Asfalto</option>
+              <option value="HIDROJATO">Somente Hidrojato</option>
             </select>
           </label>
           <button
@@ -1407,6 +1461,10 @@ const Backup: React.FC = () => {
         <div className="backup-kpi">
           <span>Asfalto</span>
           <strong>{asfaltoCount}</strong>
+        </div>
+        <div className="backup-kpi">
+          <span>Hidrojato</span>
+          <strong>{hidrojatoCount}</strong>
         </div>
         <div className="backup-kpi">
           <span>Fotos vinculadas</span>
@@ -1655,6 +1713,10 @@ const Backup: React.FC = () => {
                 <div>
                   <span>Asfalto</span>
                   <strong>{asfaltoCount}</strong>
+                </div>
+                <div>
+                  <span>Hidrojato</span>
+                  <strong>{hidrojatoCount}</strong>
                 </div>
                 <div>
                   <span>Fotos</span>

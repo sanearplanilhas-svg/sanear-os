@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import type { User } from "firebase/auth";
 import {
@@ -16,25 +16,18 @@ import {
   where,
   Timestamp,
   limit,
+  setDoc,
+  serverTimestamp,
 } from "firebase/firestore";
 
 import "./App.css";
 import { auth, db } from "./lib/firebaseClient";
-
-import BuracoNaRua from "./pages/BuracoNaRua";
-import Asfalto from "./pages/Asfalto";
-import CaminhaoHidrojato from "./pages/CaminhaoHidrojato";
-import EsgotoEntupido from "./pages/EsgotoEntupido";
-import EsgotoRetornando from "./pages/EsgotoRetornando";
-import TerceirizadaVisao from "./pages/TerceirizadaVisao";
-import ServicoSanearVisao from "./pages/ServicoSanearVisao";
-import Usuario from "./pages/Usuario";
-import Dashboard from "./pages/Dashboard";
-import ListaOrdensServico from "./pages/ListaOrdensServico";
-import Backup from "./pages/Backup";
+import { contarAnexosPendentes } from "./lib/anexosPendentes";
+import UpdatePwaNotice from "./components/UpdatePwaNotice";
 
 type MenuKey =
   | "dashboard"
+  | "alertas"
   | "buraco"
   | "asfalto"
   | "hidrojato"
@@ -44,7 +37,57 @@ type MenuKey =
   | "servico_sanear"
   | "usuario"
   | "listaOS"
+  | "anexos_pendentes"
   | "backup";
+
+const pageImporters: Record<
+  MenuKey,
+  () => Promise<{ default: React.ComponentType<any> }>
+> = {
+  dashboard: () => import("./pages/Dashboard"),
+  alertas: () => import("./pages/AlertasOperacionais"),
+  buraco: () => import("./pages/BuracoNaRua"),
+  asfalto: () => import("./pages/Asfalto"),
+  hidrojato: () => import("./pages/CaminhaoHidrojato"),
+  esgoto_entupido: () => import("./pages/EsgotoEntupido"),
+  esgoto_retornando: () => import("./pages/EsgotoRetornando"),
+  terceirizada: () => import("./pages/TerceirizadaVisao"),
+  servico_sanear: () => import("./pages/ServicoSanearVisao"),
+  usuario: () => import("./pages/Usuario"),
+  listaOS: () => import("./pages/ListaOrdensServico"),
+  anexos_pendentes: () => import("./pages/AnexosPendentes"),
+  backup: () => import("./pages/Backup"),
+};
+
+const Dashboard = lazy(pageImporters.dashboard);
+const AlertasOperacionais = lazy(pageImporters.alertas);
+const BuracoNaRua = lazy(pageImporters.buraco);
+const Asfalto = lazy(pageImporters.asfalto);
+const CaminhaoHidrojato = lazy(pageImporters.hidrojato);
+const EsgotoEntupido = lazy(pageImporters.esgoto_entupido);
+const EsgotoRetornando = lazy(pageImporters.esgoto_retornando);
+const TerceirizadaVisao = lazy(pageImporters.terceirizada);
+const ServicoSanearVisao = lazy(pageImporters.servico_sanear);
+const Usuario = lazy(pageImporters.usuario);
+const ListaOrdensServico = lazy(pageImporters.listaOS);
+const AnexosPendentes = lazy(pageImporters.anexos_pendentes);
+const Backup = lazy(pageImporters.backup);
+
+function preloadPage(menu: MenuKey) {
+  void pageImporters[menu]?.();
+}
+
+function PageLoadingFallback({ title }: { title: string }) {
+  return (
+    <section className="page-card page-loading-card" aria-live="polite">
+      <div className="page-loading-spinner" aria-hidden="true" />
+      <div>
+        <h2>Carregando {title}...</h2>
+        <p>Preparando a tela solicitada. Isso deixa o aplicativo mais leve no celular.</p>
+      </div>
+    </section>
+  );
+}
 
 type SimulatedRole = "diretor" | "operador" | "terceirizada" | "adm";
 
@@ -108,6 +151,31 @@ function getNumeroOs(data: any, fallbackId: string) {
   );
 }
 
+function timestampToMillis(value: unknown): number | null {
+  if (!value) return null;
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (value instanceof Timestamp) {
+    return value.toMillis();
+  }
+
+  const maybeTimestamp = value as { toMillis?: () => number; seconds?: number };
+
+  if (typeof maybeTimestamp?.toMillis === "function") {
+    const ms = maybeTimestamp.toMillis();
+    return Number.isFinite(ms) ? ms : null;
+  }
+
+  if (typeof maybeTimestamp?.seconds === "number") {
+    return maybeTimestamp.seconds * 1000;
+  }
+
+  return null;
+}
+
 function resolveUserRole(value: unknown): SimulatedRole {
   const role = normalizeText(String(value ?? ""));
 
@@ -150,6 +218,8 @@ function getMenuMeta(menu: MenuKey): { title: string; section: string } {
   switch (menu) {
     case "dashboard":
       return { title: "Dashboard", section: "Visão geral" };
+    case "alertas":
+      return { title: "Alertas Operacionais", section: "Central operacional" };
     case "buraco":
       return { title: "Calçamento", section: "Operacional" };
     case "asfalto":
@@ -162,6 +232,8 @@ function getMenuMeta(menu: MenuKey): { title: string; section: string } {
       return { title: "Esgoto Retornando", section: "Operacional" };
     case "listaOS":
       return { title: "Lista de Ordens de Serviço", section: "Operacional" };
+    case "anexos_pendentes":
+      return { title: "Anexos Pendentes", section: "Operacional" };
     case "terceirizada":
       return { title: "Visão da Terceirizada", section: "Terceirizada" };
     case "servico_sanear":
@@ -221,9 +293,13 @@ const App: React.FC = () => {
   const [concludedBuraco, setConcludedBuraco] = useState<NotifItem[]>([]);
   const [concludedAsfalto, setConcludedAsfalto] = useState<NotifItem[]>([]);
   const [concludedHidrojato, setConcludedHidrojato] = useState<NotifItem[]>([]);
+  const [recentlyViewedNotifications, setRecentlyViewedNotifications] = useState<NotifItem[]>([]);
+  const [notificationLastSeenMs, setNotificationLastSeenMs] = useState<number | null>(null);
+  const [notificationStateLoaded, setNotificationStateLoaded] = useState(false);
+  const [pendingAttachmentsCount, setPendingAttachmentsCount] = useState(0);
 
   // Marca d’água baseada em timestamps do Firestore (mitiga drift de relógio do cliente)
-  const [serverNowMs, setServerNowMs] = useState<number>(Date.now());
+  const [, setServerNowMs] = useState<number>(Date.now());
   const serverNowRef = useRef<number>(Date.now());
 
   const notifications = useMemo(() => {
@@ -243,6 +319,7 @@ const App: React.FC = () => {
     return Array.from(map.values()).sort((a, b) => b.tsMillis - a.tsMillis);
   }, [createdBuraco, createdAsfalto, createdHidrojato, concludedBuraco, concludedAsfalto, concludedHidrojato]);
 
+  const visibleNotifications = notifications.length > 0 ? notifications : recentlyViewedNotifications;
   const unreadCount = notifications.length;
 
   const pageMeta = getMenuMeta(activeMenu);
@@ -296,6 +373,37 @@ const App: React.FC = () => {
     [sidebarClock]
   );
 
+  useEffect(() => {
+    if (!user) {
+      setPendingAttachmentsCount(0);
+      return;
+    }
+
+    const atualizarContador = () => {
+      contarAnexosPendentes()
+        .then(setPendingAttachmentsCount)
+        .catch((error) => {
+          console.error("Erro ao contar anexos pendentes:", error);
+          setPendingAttachmentsCount(0);
+        });
+    };
+
+    atualizarContador();
+    const timer = window.setInterval(atualizarContador, 30_000);
+    window.addEventListener("focus", atualizarContador);
+    window.addEventListener("sanear-anexos-pendentes-change", atualizarContador);
+
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", atualizarContador);
+      window.removeEventListener("sanear-anexos-pendentes-change", atualizarContador);
+    };
+  }, [user]);
+
+  const pendingAttachmentsBadge = pendingAttachmentsCount > 0
+    ? pendingAttachmentsCount > 99 ? "99+" : pendingAttachmentsCount
+    : undefined;
+
   type SidebarItemProps = {
     menu: MenuKey;
     icon: string;
@@ -313,6 +421,7 @@ const App: React.FC = () => {
   };
 
   function navigate(menu: MenuKey) {
+    preloadPage(menu);
     setActiveMenu(menu);
     setMobileSheet(null);
     setNotifOpen(false);
@@ -326,6 +435,8 @@ const App: React.FC = () => {
       <button
         type="button"
         className={`mobile-nav-btn ${active ? "active" : ""}`}
+        onMouseEnter={() => preloadPage(menu)}
+        onFocus={() => preloadPage(menu)}
         onClick={() => navigate(menu)}
         aria-label={label}
       >
@@ -354,6 +465,8 @@ const App: React.FC = () => {
       <button
         type="button"
         className={`sidebar-link ${active ? "active" : ""} sidebar-link-${emphasis}`}
+        onMouseEnter={() => preloadPage(menu)}
+        onFocus={() => preloadPage(menu)}
         onClick={() => navigate(menu)}
         title={subtitle ? `${title} - ${subtitle}` : title}
       >
@@ -525,6 +638,9 @@ const App: React.FC = () => {
       setProfileLoading(false);
       setProfileName("");
       setSimulatedRole("operador");
+      setNotificationLastSeenMs(null);
+      setNotificationStateLoaded(false);
+      setRecentlyViewedNotifications([]);
       return;
     }
 
@@ -594,7 +710,11 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (profileLoading) return;
-    if (simulatedRole === "terceirizada" && activeMenu !== "terceirizada") {
+    if (
+      simulatedRole === "terceirizada" &&
+      activeMenu !== "terceirizada" &&
+      activeMenu !== "anexos_pendentes"
+    ) {
       setActiveMenu("terceirizada");
     }
   }, [profileLoading, simulatedRole, activeMenu]);
@@ -604,32 +724,76 @@ useEffect(() => {
   if (!notifOpen && !userMenuOpen) return;
   const handler = () => {
     setNotifOpen(false);
-      setUserMenuOpen(false);
+    setRecentlyViewedNotifications([]);
     setUserMenuOpen(false);
   };
   window.addEventListener("click", handler);
   return () => window.removeEventListener("click", handler);
 }, [notifOpen, userMenuOpen]);
 
-  // Listener de novas OS (criadas) e OS concluídas (dataExecucao)
+  // Estado de leitura das notificações: salvo no Firestore por usuário.
+  // Assim, quando o usuário abre as notificações em um computador,
+  // o sino também fica limpo nos outros computadores após login/sincronização.
   useEffect(() => {
-    if (!user) return;
-
-    const seenKey = `sanear-lastSeenOS-${user.uid}`;
-    const raw = localStorage.getItem(seenKey);
-    let lastSeenMs = raw ? Number(raw) : 0;
-
-    // Se o relógio do PC estiver adiantado (ou o valor salvo estiver "no futuro"), você pode perder notificações.
-    // Aqui nós corrigimos automaticamente usando a melhor aproximação de tempo do servidor que tivermos.
-    const approxServerNow = serverNowRef.current || serverNowMs || 0;
-    if (approxServerNow && lastSeenMs > approxServerNow + 60_000) {
-      lastSeenMs = approxServerNow;
-      localStorage.setItem(seenKey, String(lastSeenMs));
+    if (!user) {
+      setNotificationLastSeenMs(null);
+      setNotificationStateLoaded(false);
+      return;
     }
 
-    // Primeira vez no navegador: não mostra histórico como "novo"
-    if (!lastSeenMs || Number.isNaN(lastSeenMs)) {
-      localStorage.setItem(seenKey, String(serverNowRef.current || serverNowMs || Date.now()));
+    setNotificationStateLoaded(false);
+
+    const stateRef = doc(db, "notificacoes_usuario", user.uid);
+
+    const unsubscribe = onSnapshot(
+      stateRef,
+      (snap) => {
+        const data = snap.exists() ? (snap.data() as any) : null;
+        const lastSeen =
+          timestampToMillis(data?.ordensServicoVistasAte) ??
+          timestampToMillis(data?.lastSeenAt) ??
+          null;
+
+        setNotificationLastSeenMs(lastSeen);
+        setNotificationStateLoaded(true);
+      },
+      (err) => {
+        console.error("Erro ao carregar estado de notificações:", err);
+        setNotificationLastSeenMs(Date.now());
+        setNotificationStateLoaded(true);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [user]);
+
+  // Primeiro acesso deste usuário/dispositivo: cria a marca de leitura para não
+  // carregar todo o histórico antigo como notificação nova.
+  useEffect(() => {
+    if (!user || !notificationStateLoaded || notificationLastSeenMs !== null) return;
+
+    const stateRef = doc(db, "notificacoes_usuario", user.uid);
+    const now = serverTimestamp();
+
+    setNotificationLastSeenMs(Date.now());
+
+    setDoc(
+      stateRef,
+      {
+        userId: user.uid,
+        ordensServicoVistasAte: now,
+        lastSeenAt: now,
+        updatedAt: now,
+      },
+      { merge: true }
+    ).catch((err) => {
+      console.error("Erro ao inicializar estado de notificações:", err);
+    });
+  }, [user, notificationStateLoaded, notificationLastSeenMs]);
+
+  // Listener de novas OS (criadas) e OS concluídas (dataExecucao)
+  useEffect(() => {
+    if (!user || !notificationStateLoaded || !notificationLastSeenMs) {
       setCreatedBuraco([]);
       setCreatedAsfalto([]);
       setCreatedHidrojato([]);
@@ -639,32 +803,35 @@ useEffect(() => {
       return;
     }
 
-    const lastSeenTs = Timestamp.fromMillis(lastSeenMs);
+    const lastSeenTs = Timestamp.fromMillis(notificationLastSeenMs);
 
     const buildCreatedNotifs = (
       colName: "ordens_servico" | "ordensServico" | "ordensHidrojato",
       fallbackOrigem: "Calçamento" | "Asfalto" | "Hidrojato",
       snap: any
     ) => {
-      const items: NotifItem[] = snap.docs.map((d: any) => {
-        const data = d.data() as any;
-        const ts = (data.createdAt as Timestamp | null) ?? null;
-        const tsMillis = ts ? ts.toMillis() : Date.now();
+      const items: NotifItem[] = snap.docs
+        .map((d: any) => {
+          const data = d.data() as any;
+          const ts = (data.createdAt as Timestamp | null) ?? null;
+          const tsMillis = ts ? ts.toMillis() : Date.now();
 
-        const origemLabel = inferOrigemLabel(data.tipo, fallbackOrigem);
-        const numero = String(getNumeroOs(data, d.id));
+          const origemLabel = inferOrigemLabel(data.tipo, fallbackOrigem);
+          const numero = String(getNumeroOs(data, d.id));
 
-        return {
-          id: `created-${colName}-${d.id}-${tsMillis}`,
-          kind: "created",
-          osId: d.id,
-          collectionName: colName,
-          origemLabel,
-          numero,
-          tsMillis,
-          message: `Uma nova OS de ${origemLabel} foi criada (OS ${numero}).`,
-        };
-      });
+          return {
+            id: `created-${colName}-${d.id}-${tsMillis}`,
+            kind: "created",
+            osId: d.id,
+            collectionName: colName,
+            origemLabel,
+            numero,
+            tsMillis,
+            message: `Nova OS de ${origemLabel} criada: OS ${numero}.`,
+          };
+        })
+        .filter((n: NotifItem) => n.tsMillis > notificationLastSeenMs);
+
       return items;
     };
 
@@ -673,29 +840,32 @@ useEffect(() => {
       fallbackOrigem: "Calçamento" | "Asfalto" | "Hidrojato",
       snap: any
     ) => {
-      const items: NotifItem[] = snap.docs.map((d: any) => {
-        const data = d.data() as any;
-        const ts =
-          (data.dataExecucao as Timestamp | null) ??
-          (data.updatedAt as Timestamp | null) ??
-          null;
+      const items: NotifItem[] = snap.docs
+        .map((d: any) => {
+          const data = d.data() as any;
+          const ts =
+            (data.dataExecucao as Timestamp | null) ??
+            (data.updatedAt as Timestamp | null) ??
+            null;
 
-        const tsMillis = ts ? ts.toMillis() : Date.now();
+          const tsMillis = ts ? ts.toMillis() : Date.now();
 
-        const origemLabel = inferOrigemLabel(data.tipo, fallbackOrigem);
-        const numero = String(getNumeroOs(data, d.id));
+          const origemLabel = inferOrigemLabel(data.tipo, fallbackOrigem);
+          const numero = String(getNumeroOs(data, d.id));
 
-        return {
-          id: `concluded-${colName}-${d.id}-${tsMillis}`,
-          kind: "concluded",
-          osId: d.id,
-          collectionName: colName,
-          origemLabel,
-          numero,
-          tsMillis,
-          message: `A OS ${numero} foi marcada como concluída (${origemLabel}).`,
-        };
-      });
+          return {
+            id: `concluded-${colName}-${d.id}-${tsMillis}`,
+            kind: "concluded",
+            osId: d.id,
+            collectionName: colName,
+            origemLabel,
+            numero,
+            tsMillis,
+            message: `OS ${numero} concluída (${origemLabel}).`,
+          };
+        })
+        .filter((n: NotifItem) => n.tsMillis > notificationLastSeenMs);
+
       return items;
     };
 
@@ -787,37 +957,82 @@ useEffect(() => {
       u5();
       u6();
     };
-  }, [user, serverNowMs]);
+  }, [user, notificationStateLoaded, notificationLastSeenMs]);
 
-  function markAllAsSeen() {
+  async function saveNotificationsAsSeen() {
     if (!user) return;
-    const key = `sanear-lastSeenOS-${user.uid}`;
 
-    const maxFromFeed = notifications.reduce((acc, n) => Math.max(acc, n.tsMillis || 0), 0);
-    const approxServerNow = serverNowRef.current || serverNowMs || Date.now();
-    const watermark = Math.max(maxFromFeed, approxServerNow, 0);
+    const stateRef = doc(db, "notificacoes_usuario", user.uid);
+    const now = serverTimestamp();
 
-    localStorage.setItem(key, String(watermark));
+    await setDoc(
+      stateRef,
+      {
+        userId: user.uid,
+        ordensServicoVistasAte: now,
+        lastSeenAt: now,
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+  }
 
+  function clearNotificationFeed() {
     setCreatedBuraco([]);
     setCreatedAsfalto([]);
     setCreatedHidrojato([]);
     setConcludedBuraco([]);
     setConcludedAsfalto([]);
     setConcludedHidrojato([]);
-    setNotifOpen(false);
+  }
+
+  function markAllAsSeen(options?: { closePopover?: boolean; keepCurrentListVisible?: boolean }) {
+    if (!user) return;
+
+    if (options?.keepCurrentListVisible && notifications.length > 0) {
+      setRecentlyViewedNotifications(notifications);
+    } else if (!options?.keepCurrentListVisible) {
+      setRecentlyViewedNotifications([]);
+    }
+
+    // Atualiza a tela imediatamente. O Firestore confirma em seguida e sincroniza outros PCs.
+    setNotificationLastSeenMs(Date.now());
+    clearNotificationFeed();
+
+    saveNotificationsAsSeen().catch((err) => {
+      console.error("Erro ao marcar notificações como vistas:", err);
+    });
+
+    if (options?.closePopover !== false) {
+      setNotifOpen(false);
+    }
+  }
+
+  function toggleNotifications() {
+    const willOpen = !notifOpen;
+
+    setUserMenuOpen(false);
+    setNotifOpen(willOpen);
+
+    if (!willOpen) {
+      setRecentlyViewedNotifications([]);
+      return;
+    }
+
+    if (notifications.length > 0) {
+      markAllAsSeen({ closePopover: false, keepCurrentListVisible: true });
+    }
   }
 
   function openNotification(n: NotifItem) {
-    // marca como visto (prático e simples)
-    markAllAsSeen();
-
     // manda abrir na Lista + detalhes da OS
     window.sessionStorage.setItem(
       "sanear-open-os",
       JSON.stringify({ id: n.osId, col: n.collectionName })
     );
 
+    setRecentlyViewedNotifications([]);
+    setNotifOpen(false);
     setActiveMenu("listaOS");
   }
 
@@ -872,25 +1087,16 @@ useEffect(() => {
     }
   }
 
-  function renderContent() {
-    if (profileLoading) {
-      return (
-        <section className="page-card">
-          <div className="empty-state">
-            <h2>Carregando perfil de acesso...</h2>
-            <p>Consultando o nível de acesso gravado no banco de dados.</p>
-          </div>
-        </section>
-      );
-    }
-
-    if (simulatedRole === "terceirizada" && activeMenu !== "terceirizada") {
+  function renderActivePage() {
+    if (simulatedRole === "terceirizada" && activeMenu !== "terceirizada" && activeMenu !== "anexos_pendentes") {
       return <TerceirizadaVisao />;
     }
 
     switch (activeMenu) {
       case "dashboard":
         return <Dashboard />;
+      case "alertas":
+        return <AlertasOperacionais />;
       case "buraco":
         return <BuracoNaRua onBack={() => setActiveMenu("dashboard")} />;
       case "asfalto":
@@ -909,6 +1115,8 @@ useEffect(() => {
         return <Usuario />;
       case "listaOS":
         return <ListaOrdensServico />;
+      case "anexos_pendentes":
+        return <AnexosPendentes />;
       case "backup":
         return <Backup />;
       default:
@@ -916,9 +1124,30 @@ useEffect(() => {
     }
   }
 
+  function renderContent() {
+    if (profileLoading) {
+      return (
+        <section className="page-card">
+          <div className="empty-state">
+            <h2>Carregando perfil de acesso...</h2>
+            <p>Consultando o nível de acesso gravado no banco de dados.</p>
+          </div>
+        </section>
+      );
+    }
+
+    return (
+      <Suspense fallback={<PageLoadingFallback title={simulatedRole === "terceirizada" ? "Visão da Terceirizada" : pageMeta.title} />}>
+        {renderActivePage()}
+      </Suspense>
+    );
+  }
+
   if (authLoading || (user && profileLoading)) {
     return (
-      <div className="login-page">
+      <>
+        <UpdatePwaNotice />
+        <div className="login-page">
         <div className="login-left">
           <div className="login-box">
             <h1 className="login-title">Sanear Operacional</h1>
@@ -932,13 +1161,15 @@ useEffect(() => {
             className="login-watermark-image"
           />
         </div>
-      </div>
+        </div>
+      </>
     );
   }
 
   if (!user) {
     return (
       <>
+        <UpdatePwaNotice />
         <div className="login-page">
           <div className="login-left">
             <div className="login-box">
@@ -1109,6 +1340,7 @@ useEffect(() => {
 
   return (
     <div className="app-shell">
+      <UpdatePwaNotice />
       <aside className="sidebar">
         <div className="sidebar-brand sidebar-brand-modern">
           <div className="sidebar-logo-circle sidebar-logo-modern">S</div>
@@ -1146,6 +1378,15 @@ useEffect(() => {
                 badge={unreadCount > 0 ? unreadCount > 99 ? "99+" : unreadCount : undefined}
                 emphasis="primary"
               />
+              {!isTerceirizada && (
+                <SidebarItem
+                  menu="alertas"
+                  icon="🚨"
+                  title="Alertas"
+                  subtitle="Pendências críticas"
+                  emphasis="warning"
+                />
+              )}
               {!isTerceirizada && (
                 <SidebarItem
                   menu="listaOS"
@@ -1219,6 +1460,14 @@ useEffect(() => {
                 title="Área da Terceirizada"
                 subtitle="Serviços enviados"
               />
+              <SidebarItem
+                menu="anexos_pendentes"
+                icon="📎"
+                title="Anexos Pendentes"
+                subtitle="Reenvio local"
+                badge={pendingAttachmentsBadge}
+                emphasis="warning"
+              />
             </div>
           </div>
 
@@ -1277,10 +1526,7 @@ useEffect(() => {
         <button
           type="button"
           className="notif2-btn"
-          onClick={() => {
-            setUserMenuOpen(false);
-            setNotifOpen((p) => !p);
-          }}
+          onClick={toggleNotifications}
           aria-label="Notificações"
           title="Notificações"
         >
@@ -1302,16 +1548,20 @@ useEffect(() => {
                 </div>
               </div>
 
-              <button type="button" className="notif2-clear" onClick={markAllAsSeen}>
+              <button
+                type="button"
+                className="notif2-clear"
+                onClick={() => markAllAsSeen({ closePopover: true })}
+              >
                 Marcar tudo como visto
               </button>
             </div>
 
-            {notifications.length === 0 ? (
+            {visibleNotifications.length === 0 ? (
               <div className="notif2-empty">Nenhuma notificação nova.</div>
             ) : (
               <div className="notif2-list">
-                {notifications.map((n) => (
+                {visibleNotifications.map((n) => (
                   <button
                     key={n.id}
                     type="button"
@@ -1380,6 +1630,17 @@ useEffect(() => {
 
               <button
                 type="button"
+                className="user2-item"
+                onClick={() => {
+                  setUserMenuOpen(false);
+                  navigate("anexos_pendentes");
+                }}
+              >
+                📎 Anexos Pendentes{pendingAttachmentsCount > 0 ? ` (${pendingAttachmentsCount})` : ""}
+              </button>
+
+              <button
+                type="button"
                 className="user2-item user2-item-danger"
                 onClick={handleLogout}
               >
@@ -1400,6 +1661,12 @@ useEffect(() => {
         {isTerceirizada ? (
           <>
             <MobileNavButton menu="terceirizada" icon="🤝" label="Área" />
+            <MobileNavButton
+              menu="anexos_pendentes"
+              icon="📎"
+              label="Anexos"
+              badge={pendingAttachmentsBadge}
+            />
             <button
               type="button"
               className="mobile-nav-btn"
@@ -1533,10 +1800,20 @@ useEffect(() => {
                   <strong>Lista de OS</strong>
                   <small>Consultar, abrir PDF e acompanhar</small>
                 </button>
+                <button type="button" className="mobile-sheet-row" onClick={() => navigate("alertas")}>
+                  <span>🚨</span>
+                  <strong>Alertas Operacionais</strong>
+                  <small>SLA, SANEAR, anexos e reaberturas</small>
+                </button>
                 <button type="button" className="mobile-sheet-row" onClick={() => navigate("terceirizada")}>
                   <span>🤝</span>
                   <strong>Área da Terceirizada</strong>
                   <small>Serviços externos</small>
+                </button>
+                <button type="button" className="mobile-sheet-row" onClick={() => navigate("anexos_pendentes")}>
+                  <span>📎</span>
+                  <strong>Anexos Pendentes</strong>
+                  <small>Reenvio de PDFs e fotos locais</small>
                 </button>
                 <button type="button" className="mobile-sheet-row" onClick={() => navigate("usuario")}>
                   <span>👤</span>

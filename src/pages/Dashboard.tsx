@@ -19,7 +19,16 @@ import {
 } from "recharts";
 
 import { db } from "../lib/firebaseClient";
-import { MS_POR_HORA, SLA_HORAS_PADRAO } from "../lib/sla";
+import { generateDashboardReportPdf } from "../lib/dashboardReportPdf";
+import type { DashboardReportPayload } from "../lib/dashboardReportPdf";
+import { MS_POR_HORA, SLA_CONFIGS, getSlaConfigFromOrder, getSlaHorasFromOrder } from "../lib/sla";
+import {
+  formatOrdemStatusLabel,
+  isOrdemAguardandoSanear,
+  isOrdemCancelada,
+  isOrdemConcluida,
+  normalizeOrdemStatus,
+} from "../lib/status";
 import type { SlaPausa } from "../lib/sla";
 import "./Dashboard.css";
 
@@ -35,7 +44,7 @@ type RealModuleKey = Exclude<ModuleKey, "geral" | "esgotoRetornando" | "esgotoEn
 type FutureModuleKey = "esgotoRetornando" | "esgotoEntupido";
 type DashboardTab = ModuleKey;
 type FilterPreset = "hoje" | "7dias" | "30dias" | "mes" | "tudo" | "personalizado";
-type ExpandedCardId = "status" | "sla" | "modulos" | "produtividade" | "caminhao";
+type ExpandedCardId = "status" | "sla" | "modulos" | "produtividade" | "caminhao" | "bairros";
 type ServiceArea = "TERCEIRIZADA" | "SERVICO_SANEAR" | "IMPLANTACAO";
 
 type DashboardOrder = {
@@ -45,7 +54,9 @@ type DashboardOrder = {
   createdAt: Timestamp | Date | null;
   dataExecucao: Timestamp | Date | null;
   slaHoras: number | null;
+  slaServico: string | null;
   slaPausas: SlaPausa[];
+  tipo: string | null;
   protocolo: string | null;
   ordemServico: string | null;
   bairro: string | null;
@@ -65,6 +76,34 @@ type ProductivityValue = {
   dia: string;
   dataCompleta: string;
   concluidas: number;
+};
+
+type RankingValue = {
+  name: string;
+  total: number;
+  abertas: number;
+  atrasadas: number;
+  concluidas: number;
+  aguardandoSanear: number;
+  percentAtraso: number;
+};
+
+type ServiceRankingValue = {
+  key: RealModuleKey;
+  name: string;
+  areaLabel: string;
+  total: number;
+  abertas: number;
+  atrasadas: number;
+  concluidas: number;
+  percentConclusao: number;
+};
+
+type ExecutiveInsight = {
+  id: string;
+  title: string;
+  description: string;
+  tone: "danger" | "warning" | "success" | "info";
 };
 
 type ModuleSummary = {
@@ -114,6 +153,10 @@ type Metrics = {
   caminhaoData: ChartValue[];
   produtividade7dias: ProductivityValue[];
   attentionItems: AttentionItem[];
+  bairroRanking: RankingValue[];
+  bairroAtrasoRanking: RankingValue[];
+  serviceRanking: ServiceRankingValue[];
+  executiveInsights: ExecutiveInsight[];
 };
 
 type ExpandedCardConfig = {
@@ -226,45 +269,33 @@ const TAB_KEYS: DashboardTab[] = [
 const REAL_MODULE_KEYS: RealModuleKey[] = ["calcamento", "asfalto", "hidrojato"];
 const FUTURE_MODULE_KEYS: FutureModuleKey[] = ["esgotoRetornando", "esgotoEntupido"];
 
-function normalizeText(value: unknown): string {
+function normalizeStatus(value: unknown): string {
+  return normalizeOrdemStatus(value);
+}
+
+function normalizeToken(value: unknown): string {
   return String(value ?? "")
     .trim()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
-    .toUpperCase();
-}
-
-function normalizeStatus(value: unknown): string {
-  return normalizeText(value).replace(/[\s-]+/g, "_");
+    .toUpperCase()
+    .replace(/[\s-]+/g, "_");
 }
 
 function isConcluida(status: unknown): boolean {
-  const normalized = normalizeStatus(status);
-  return normalized === "CONCLUIDA" || normalized === "CONCLUIDO";
+  return isOrdemConcluida(status);
 }
 
 function isCancelada(status: unknown): boolean {
-  const normalized = normalizeStatus(status);
-  return normalized === "CANCELADA" || normalized === "CANCELADO";
+  return isOrdemCancelada(status);
 }
 
 function isAguardandoSanear(status: unknown): boolean {
-  return normalizeStatus(status) === "AGUARDANDO_SANEAR";
+  return isOrdemAguardandoSanear(status);
 }
 
 function formatStatusLabel(status: unknown): string {
-  const normalized = normalizeStatus(status);
-  const labels: Record<string, string> = {
-    ABERTA: "Aberta",
-    ANDAMENTO: "Em andamento",
-    EM_ANDAMENTO: "Em andamento",
-    AGUARDANDO_SANEAR: "Aguardando SANEAR",
-    CONCLUIDA: "Concluída",
-    CONCLUIDO: "Concluída",
-    CANCELADA: "Cancelada",
-    CANCELADO: "Cancelada",
-  };
-  return (labels[normalized] ?? normalized.replaceAll("_", " ").toLowerCase()) || "Aberta";
+  return formatOrdemStatusLabel(status);
 }
 
 function toDate(value: unknown): Date | null {
@@ -330,9 +361,7 @@ function addDays(date: Date, amount: number): Date {
 }
 
 function getSlaHours(os: DashboardOrder): number {
-  return typeof os.slaHoras === "number" && os.slaHoras > 0
-    ? os.slaHoras
-    : SLA_HORAS_PADRAO;
+  return getSlaHorasFromOrder(os);
 }
 
 function getActiveHours(os: DashboardOrder, referenceDate: Date): number {
@@ -376,6 +405,35 @@ function getOrderLocation(os: DashboardOrder): string {
   return [os.bairro, street].filter(Boolean).join(" • ") || "Local não informado";
 }
 
+function normalizeRankingName(value: string | null, fallback: string): string {
+  const text = String(value ?? "").trim();
+  return text || fallback;
+}
+
+function createEmptyRankingValue(name: string): RankingValue {
+  return {
+    name,
+    total: 0,
+    abertas: 0,
+    atrasadas: 0,
+    concluidas: 0,
+    aguardandoSanear: 0,
+    percentAtraso: 0,
+  };
+}
+
+function finalizeRankingValue(item: RankingValue): RankingValue {
+  return {
+    ...item,
+    percentAtraso: item.total > 0 ? Math.round((item.atrasadas / item.total) * 100) : 0,
+  };
+}
+
+function formatPercent(value: number): string {
+  if (!Number.isFinite(value)) return "0%";
+  return `${Math.round(value)}%`;
+}
+
 function mapSnapshotDocument(
   id: string,
   data: Record<string, unknown>,
@@ -388,7 +446,9 @@ function mapSnapshotDocument(
     createdAt: (data.createdAt as Timestamp | Date | null | undefined) ?? null,
     dataExecucao: (data.dataExecucao as Timestamp | Date | null | undefined) ?? null,
     slaHoras: typeof data.slaHoras === "number" ? data.slaHoras : null,
+    slaServico: stringOrNull(data.slaServico),
     slaPausas: Array.isArray(data.slaPausas) ? (data.slaPausas as SlaPausa[]) : [],
+    tipo: stringOrNull(data.tipo),
     protocolo: stringOrNull(data.protocolo),
     ordemServico: stringOrNull(data.ordemServico ?? data.os ?? data.numeroOs),
     bairro: stringOrNull(data.bairro),
@@ -462,20 +522,42 @@ function buildMetrics(
     IMPLANTACAO: 0,
   };
 
+  const moduleStatusMap: Record<RealModuleKey, {
+    total: number;
+    abertas: number;
+    atrasadas: number;
+    concluidas: number;
+  }> = {
+    calcamento: { total: 0, abertas: 0, atrasadas: 0, concluidas: 0 },
+    asfalto: { total: 0, abertas: 0, atrasadas: 0, concluidas: 0 },
+    hidrojato: { total: 0, abertas: 0, atrasadas: 0, concluidas: 0 },
+  };
+
+  const bairroMap = new Map<string, RankingValue>();
   const attentionItems: AttentionItem[] = [];
 
   for (const os of ordensCriadasNoPeriodo) {
     const config = MODULE_CONFIG[os.moduleKey];
+    const bairroName = normalizeRankingName(os.bairro, "Bairro não informado");
+    const bairroData = bairroMap.get(bairroName) ?? createEmptyRankingValue(bairroName);
+
     moduleMap[os.moduleKey] += 1;
+    moduleStatusMap[os.moduleKey].total += 1;
     serviceMap[config.area] += 1;
+    bairroData.total += 1;
 
     if (isConcluida(os.status)) {
       concluidasStatusPeriodo += 1;
       statusMap.concluidas += 1;
+      moduleStatusMap[os.moduleKey].concluidas += 1;
+      bairroData.concluidas += 1;
+      bairroMap.set(bairroName, bairroData);
       continue;
     }
 
     abertasCount += 1;
+    moduleStatusMap[os.moduleKey].abertas += 1;
+    bairroData.abertas += 1;
     const normalized = normalizeStatus(os.status);
 
     if (normalized === "ANDAMENTO" || normalized === "EM_ANDAMENTO") {
@@ -484,16 +566,20 @@ function buildMetrics(
       aguardandoSanearCount += 1;
       statusMap.aguardando += 1;
       slaMap.pausadas += 1;
+      bairroData.aguardandoSanear += 1;
     } else {
       statusMap.abertas += 1;
     }
 
+    const slaConfig = getSlaConfigFromOrder(os);
     const slaHours = getSlaHours(os);
     const activeHours = getActiveHours(os, referenceDate);
     const isAguardando = isAguardandoSanear(os.status);
 
     if (activeHours > slaHours) {
       atrasadasCount += 1;
+      moduleStatusMap[os.moduleKey].atrasadas += 1;
+      bairroData.atrasadas += 1;
       if (!isAguardando) slaMap.atrasadas += 1;
       attentionItems.push({
         id: os.id,
@@ -501,7 +587,7 @@ function buildMetrics(
         moduleLabel: config.shortLabel,
         title: getOrderTitle(os),
         location: getOrderLocation(os),
-        statusLabel: formatStatusLabel(os.status),
+        statusLabel: `${formatStatusLabel(os.status)} • ${slaConfig.label} (${slaHours}h)`,
         hours: activeHours,
         severity: "danger",
       });
@@ -514,13 +600,15 @@ function buildMetrics(
         moduleLabel: config.shortLabel,
         title: getOrderTitle(os),
         location: getOrderLocation(os),
-        statusLabel: formatStatusLabel(os.status),
+        statusLabel: `${formatStatusLabel(os.status)} • ${slaConfig.label} (${slaHours}h)`,
         hours: activeHours,
         severity: "warning",
       });
     } else if (!isAguardando) {
       slaMap.dentro += 1;
     }
+
+    bairroMap.set(bairroName, bairroData);
   }
 
   const concluidasNoPeriodo = ordensValidas.reduce((total, os) => {
@@ -573,7 +661,7 @@ function buildMetrics(
   };
 
   for (const os of hidrojatoConcluidas) {
-    const tipo = normalizeStatus(os.tipoCaminhaoExecucao);
+    const tipo = normalizeToken(os.tipoCaminhaoExecucao);
     if (tipo === "PROPRIO") caminhaoMap.proprio += 1;
     else if (tipo === "TERCEIRIZADO") caminhaoMap.terceirizado += 1;
     else caminhaoMap.naoInformado += 1;
@@ -584,6 +672,94 @@ function buildMetrics(
   const taxaConclusao = totalPeriodo > 0
     ? Math.round((concluidasStatusPeriodo / totalPeriodo) * 100)
     : 0;
+
+  const bairroRanking = Array.from(bairroMap.values())
+    .map(finalizeRankingValue)
+    .sort((a, b) => b.total - a.total || b.atrasadas - a.atrasadas || a.name.localeCompare(b.name))
+    .slice(0, 6);
+
+  const bairroAtrasoRanking = Array.from(bairroMap.values())
+    .map(finalizeRankingValue)
+    .filter((item) => item.atrasadas > 0 || item.aguardandoSanear > 0)
+    .sort((a, b) => b.atrasadas - a.atrasadas || b.aguardandoSanear - a.aguardandoSanear || b.total - a.total)
+    .slice(0, 6);
+
+  const serviceRanking = REAL_MODULE_KEYS.map((key) => {
+    const item = moduleStatusMap[key];
+    return {
+      key,
+      name: MODULE_CONFIG[key].label,
+      areaLabel: MODULE_CONFIG[key].areaLabel,
+      total: item.total,
+      abertas: item.abertas,
+      atrasadas: item.atrasadas,
+      concluidas: item.concluidas,
+      percentConclusao: item.total > 0 ? Math.round((item.concluidas / item.total) * 100) : 0,
+    };
+  }).sort((a, b) => b.total - a.total || b.atrasadas - a.atrasadas);
+
+  const topBairro = bairroRanking[0] ?? null;
+  const topBairroAtraso = bairroAtrasoRanking[0] ?? null;
+  const executiveInsights: ExecutiveInsight[] = [];
+
+  if (atrasadasCount > 0) {
+    executiveInsights.push({
+      id: "atrasadas",
+      title: "Atacar OS atrasadas primeiro",
+      description: `${atrasadasCount} OS passaram do prazo de SLA neste filtro. Priorize as mais antigas e os bairros com maior concentração.`,
+      tone: "danger",
+    });
+  } else {
+    executiveInsights.push({
+      id: "sem-atraso",
+      title: "SLA controlado no filtro",
+      description: "Nenhuma OS aberta passou do prazo neste período. Mantenha o acompanhamento das OS em atenção.",
+      tone: "success",
+    });
+  }
+
+  if (aguardandoSanearCount > 0) {
+    executiveInsights.push({
+      id: "aguardando-sanear",
+      title: "Pendências internas pausando execução",
+      description: `${aguardandoSanearCount} OS estão aguardando liberação do SANEAR. Vale revisar essas pendências antes de cobrar campo/terceirizada.`,
+      tone: "warning",
+    });
+  }
+
+  if (topBairro) {
+    executiveInsights.push({
+      id: "bairro-volume",
+      title: `Maior demanda: ${topBairro.name}`,
+      description: `${topBairro.total} OS no período, com ${topBairro.abertas} abertas e ${topBairro.concluidas} concluídas.`,
+      tone: topBairro.atrasadas > 0 ? "warning" : "info",
+    });
+  }
+
+  if (topBairroAtraso) {
+    executiveInsights.push({
+      id: "bairro-atraso",
+      title: `Bairro crítico: ${topBairroAtraso.name}`,
+      description: `${topBairroAtraso.atrasadas} OS atrasadas e ${topBairroAtraso.aguardandoSanear} aguardando SANEAR.`,
+      tone: "danger",
+    });
+  }
+
+  if (totalPeriodo > 0 && taxaConclusao < 35) {
+    executiveInsights.push({
+      id: "taxa-baixa",
+      title: "Baixa taxa de conclusão",
+      description: `A taxa de conclusão está em ${taxaConclusao}%. Verifique gargalos de equipe, terceirizada ou pendências SANEAR.`,
+      tone: "warning",
+    });
+  } else if (totalPeriodo > 0 && taxaConclusao >= 70) {
+    executiveInsights.push({
+      id: "taxa-boa",
+      title: "Boa produtividade no período",
+      description: `${taxaConclusao}% das OS criadas no filtro já estão concluídas.`,
+      tone: "success",
+    });
+  }
 
   return {
     totalPeriodo,
@@ -629,6 +805,10 @@ function buildMetrics(
     attentionItems: attentionItems
       .sort((a, b) => b.hours - a.hours)
       .slice(0, 6),
+    bairroRanking,
+    bairroAtrasoRanking,
+    serviceRanking,
+    executiveInsights: executiveInsights.slice(0, 5),
   };
 }
 
@@ -771,6 +951,7 @@ const Dashboard: React.FC = () => {
   const [isFilterOpen, setIsFilterOpen] = useState(false);
 
   const [expandedCard, setExpandedCard] = useState<ExpandedCardConfig | null>(null);
+  const [isGeneratingReport, setIsGeneratingReport] = useState(false);
 
   const loading = loadingCalcamento || loadingAsfalto || loadingHidrojato;
   const isPeriodFilterActive = Boolean(filterStartDate || filterEndDate);
@@ -1073,6 +1254,11 @@ const Dashboard: React.FC = () => {
         title: "Hidrojato — tipo de caminhão",
         subtitle: "Serviços finalizados com caminhão próprio ou caminhão terceirizado.",
       },
+      bairros: {
+        id: "bairros",
+        title: "Bairros com maior demanda",
+        subtitle: "Ranking de bairros com mais ordens criadas dentro do filtro atual.",
+      },
     }),
     []
   );
@@ -1089,6 +1275,65 @@ const Dashboard: React.FC = () => {
     },
     [openExpanded]
   );
+
+  const handleGenerateManagerReport = useCallback(async () => {
+    const reportPayload: DashboardReportPayload = {
+      title: "Relatório Gerencial SANEAR",
+      subtitle: "Resumo executivo das ordens de serviço, prazos, atrasos, bairros críticos e desempenho operacional.",
+      sectionTitle: header.title,
+      periodLabel: filterRangeLabel,
+      generatedAtLabel: now.toLocaleString("pt-BR"),
+      metrics: [
+        { label: "OS no período", value: String(currentMetrics.totalPeriodo), note: "Criadas no filtro atual" },
+        { label: "Abertas", value: String(currentMetrics.abertasCount), note: "Backlog operacional" },
+        { label: "Atrasadas", value: String(currentMetrics.atrasadasCount), note: "Acima do SLA" },
+        { label: "Aguardando SANEAR", value: String(currentMetrics.aguardandoSanearCount), note: "Pausadas por ação interna" },
+        { label: "Taxa de conclusão", value: `${currentMetrics.taxaConclusao}%`, note: "Concluídas no período" },
+        { label: "Média de conclusão", value: formatHours(currentMetrics.mediaHorasConclusao), note: "Tempo médio das concluídas" },
+      ],
+      statusRows: currentMetrics.resumoStatus.map((item) => ({ label: item.name, value: item.value })),
+      slaRows: currentMetrics.slaData.map((item) => ({ label: item.name, value: item.value })),
+      moduleRows: currentMetrics.modulosData.map((item) => ({ label: item.name, value: item.value })),
+      serviceRows: currentMetrics.serviceRanking.map((item) => ({
+        name: item.name,
+        areaLabel: item.areaLabel,
+        total: item.total,
+        abertas: item.abertas,
+        concluidas: item.concluidas,
+        atrasadas: item.atrasadas,
+        percentConclusao: item.percentConclusao,
+      })),
+      bairroRanking: currentMetrics.bairroRanking,
+      bairroAtrasoRanking: currentMetrics.bairroAtrasoRanking,
+      attentionRows: currentMetrics.attentionItems.map((item) => ({
+        moduleLabel: item.moduleLabel,
+        title: item.title,
+        location: item.location,
+        statusLabel: item.statusLabel,
+        hours: formatHours(item.hours),
+      })),
+      insightRows: currentMetrics.executiveInsights.map((item) => ({
+        title: item.title,
+        description: item.description,
+      })),
+      slaConfigRows: Object.values(SLA_CONFIGS).map((config) => ({
+        service: config.label,
+        prazo: `${config.horas} horas úteis`,
+        prioridade: config.prioridade,
+        area: config.areaResponsavel === "SERVICO_SANEAR" ? "Serviço SANEAR" : config.areaResponsavel === "TERCEIRIZADA" ? "Terceirizada" : "Em implantação",
+      })),
+    };
+
+    try {
+      setIsGeneratingReport(true);
+      await generateDashboardReportPdf(reportPayload);
+    } catch (error) {
+      console.error("Erro ao gerar relatório gerencial:", error);
+      window.alert("Não foi possível gerar o relatório gerencial agora. Tente novamente.");
+    } finally {
+      setIsGeneratingReport(false);
+    }
+  }, [currentMetrics, filterRangeLabel, header.title, now]);
 
   const handlePrintDashboard = useCallback(() => {
     document.body.classList.add("print-dashboard");
@@ -1301,6 +1546,47 @@ const Dashboard: React.FC = () => {
     [currentMetrics.caminhaoData, renderLegendPrintOnly]
   );
 
+  const renderBairroChart = useCallback(
+    (height: number) => {
+      const data = currentMetrics.bairroRanking.map((item) => ({
+        name: item.name.length > 20 ? `${item.name.slice(0, 20)}...` : item.name,
+        total: item.total,
+        abertas: item.abertas,
+        atrasadas: item.atrasadas,
+        fullName: item.name,
+      }));
+
+      if (data.length === 0) {
+        return <ChartEmptyState message="Nenhum bairro possui OS no período selecionado." />;
+      }
+
+      return (
+        <>
+          <ResponsiveContainer width="100%" height={height}>
+            <BarChart data={data} layout="vertical" margin={{ top: 12, right: 34, left: 18, bottom: 26 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+              <XAxis type="number" allowDecimals={false} tick={{ fontSize: 11 }} />
+              <YAxis type="category" dataKey="name" width={132} tick={{ fontSize: 11 }} />
+              <Tooltip
+                formatter={(value, name) => [String(value), name === "total" ? "Total" : name === "abertas" ? "Abertas" : "Atrasadas"]}
+                labelFormatter={(_, payload) => payload?.[0]?.payload?.fullName ?? ""}
+                contentStyle={TOOLTIP_STYLE}
+              />
+              <Legend wrapperStyle={{ fontSize: 12 }} />
+              <Bar dataKey="total" name="Total" fill="#2563eb" radius={[0, 8, 8, 0]}>
+                <LabelList dataKey="total" position="right" fontSize={11} />
+              </Bar>
+              <Bar dataKey="abertas" name="Abertas" fill="#f97316" radius={[0, 8, 8, 0]} />
+              <Bar dataKey="atrasadas" name="Atrasadas" fill="#dc2626" radius={[0, 8, 8, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+          {renderLegendPrintOnly(currentMetrics.bairroRanking.map((item) => `${item.name}: ${item.total}`))}
+        </>
+      );
+    },
+    [currentMetrics.bairroRanking, renderLegendPrintOnly]
+  );
+
   const expandedContent = useMemo(() => {
     if (!expandedCard) return null;
 
@@ -1319,6 +1605,12 @@ const Dashboard: React.FC = () => {
     } else if (expandedCard.id === "caminhao") {
       chart = renderCaminhaoChart(CHART_HEIGHT_MODAL);
       summaryLines = chunkLines(currentMetrics.caminhaoData.map((item) => `${item.name}: ${item.value}`), 2);
+    } else if (expandedCard.id === "bairros") {
+      chart = renderBairroChart(CHART_HEIGHT_MODAL);
+      summaryLines = chunkLines(
+        currentMetrics.bairroRanking.map((item) => `${item.name}: ${item.total} OS, ${item.atrasadas} atrasadas`),
+        2
+      );
     } else {
       chart = renderProductivityChart(CHART_HEIGHT_MODAL);
       summaryLines = chunkLines(currentMetrics.produtividade7dias.map((item) => `${item.dia}: ${item.concluidas}`), 4);
@@ -1340,6 +1632,7 @@ const Dashboard: React.FC = () => {
   }, [
     currentMetrics,
     expandedCard,
+    renderBairroChart,
     renderCaminhaoChart,
     renderModulesChart,
     renderProductivityChart,
@@ -1705,12 +1998,12 @@ const Dashboard: React.FC = () => {
             <div className="dashboard-kpi-card kpi-atencao">
               <div className="dashboard-kpi-header"><span className="dashboard-kpi-icon">⚠️</span><span className="dashboard-kpi-label">Em atenção</span></div>
               <div className="dashboard-kpi-value">{currentMetrics.atencaoCount}</div>
-              <div className="dashboard-kpi-sub">Acima de 75% do SLA padrão.</div>
+              <div className="dashboard-kpi-sub">Acima de 75% do prazo do serviço.</div>
             </div>
             <div className="dashboard-kpi-card kpi-atrasadas">
               <div className="dashboard-kpi-header"><span className="dashboard-kpi-icon">⏱</span><span className="dashboard-kpi-label">Atrasadas</span></div>
               <div className="dashboard-kpi-value">{currentMetrics.atrasadasCount}</div>
-              <div className="dashboard-kpi-sub">Acima do SLA configurado de {SLA_HORAS_PADRAO}h.</div>
+              <div className="dashboard-kpi-sub">Acima do prazo configurado por serviço.</div>
             </div>
             <div className="dashboard-kpi-card kpi-concluidas">
               <div className="dashboard-kpi-header"><span className="dashboard-kpi-icon">✅</span><span className="dashboard-kpi-label">Concluídas</span></div>
@@ -1799,6 +2092,143 @@ const Dashboard: React.FC = () => {
             </div>
           </div>
 
+          <div className="dashboard-smart-grid">
+            <div className="dashboard-smart-card">
+              <div className="dashboard-smart-header">
+                <div>
+                  <h3>Bairros com maior demanda</h3>
+                  <p>Onde o volume de OS está mais concentrado no período.</p>
+                </div>
+                <span>Top</span>
+              </div>
+              {currentMetrics.bairroRanking.length === 0 ? (
+                <div className="dashboard-smart-empty">Nenhum bairro no filtro atual.</div>
+              ) : (
+                <div className="dashboard-ranking-list">
+                  {currentMetrics.bairroRanking.map((item, index) => (
+                    <div key={item.name} className="dashboard-ranking-item">
+                      <div className="dashboard-ranking-index">{index + 1}</div>
+                      <div className="dashboard-ranking-main">
+                        <strong>{item.name}</strong>
+                        <small>{item.abertas} abertas • {item.concluidas} concluídas • {item.atrasadas} atrasadas</small>
+                        <div className="dashboard-ranking-track">
+                          <span style={{ width: `${Math.max(6, Math.min(100, (item.total / Math.max(currentMetrics.bairroRanking[0]?.total ?? 1, 1)) * 100))}%` }} />
+                        </div>
+                      </div>
+                      <b>{item.total}</b>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="dashboard-smart-card">
+              <div className="dashboard-smart-header">
+                <div>
+                  <h3>Bairros críticos</h3>
+                  <p>Bairros com OS atrasadas ou paradas aguardando SANEAR.</p>
+                </div>
+                <span>Risco</span>
+              </div>
+              {currentMetrics.bairroAtrasoRanking.length === 0 ? (
+                <div className="dashboard-smart-empty">Nenhum bairro crítico neste filtro.</div>
+              ) : (
+                <div className="dashboard-critical-list">
+                  {currentMetrics.bairroAtrasoRanking.map((item) => (
+                    <div key={item.name} className="dashboard-critical-item">
+                      <div>
+                        <strong>{item.name}</strong>
+                        <small>{item.total} OS no período • {formatPercent(item.percentAtraso)} com atraso</small>
+                      </div>
+                      <div>
+                        <b>{item.atrasadas}</b>
+                        <small>Atrasadas</small>
+                      </div>
+                      <div>
+                        <b>{item.aguardandoSanear}</b>
+                        <small>Aguard. SANEAR</small>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="dashboard-smart-card">
+              <div className="dashboard-smart-header">
+                <div>
+                  <h3>Desempenho por serviço</h3>
+                  <p>Comparativo entre Calçamento, Asfalto e Hidrojato.</p>
+                </div>
+                <span>Serviço</span>
+              </div>
+              <div className="dashboard-service-list">
+                {currentMetrics.serviceRanking.map((item) => (
+                  <div key={item.key} className="dashboard-service-item">
+                    <div>
+                      <strong>{item.name}</strong>
+                      <small>{item.areaLabel}</small>
+                    </div>
+                    <div className="dashboard-service-metrics">
+                      <span><b>{item.total}</b>Total</span>
+                      <span><b>{item.abertas}</b>Abertas</span>
+                      <span><b>{item.atrasadas}</b>Atraso</span>
+                      <span><b>{formatPercent(item.percentConclusao)}</b>Conclusão</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="dashboard-smart-card dashboard-sla-rules-card">
+              <div className="dashboard-smart-header">
+                <div>
+                  <h3>Prazos por serviço</h3>
+                  <p>Regra atual usada para classificar atenção e atraso.</p>
+                </div>
+                <span>SLA</span>
+              </div>
+              <div className="dashboard-sla-rules-list">
+                {[
+                  SLA_CONFIGS.CALCAMENTO,
+                  SLA_CONFIGS.ASFALTO,
+                  SLA_CONFIGS.HIDROJATO,
+                  SLA_CONFIGS.ESGOTO_ENTUPIDO,
+                  SLA_CONFIGS.ESGOTO_RETORNANDO,
+                ].map((item) => (
+                  <div key={item.key} className={`dashboard-sla-rule is-${item.prioridade.toLowerCase()}`}>
+                    <div>
+                      <strong>{item.label}</strong>
+                      <small>{item.descricao}</small>
+                    </div>
+                    <div>
+                      <b>{item.horas}h</b>
+                      <small>{item.prioridade}</small>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="dashboard-smart-card dashboard-smart-card--insights">
+              <div className="dashboard-smart-header">
+                <div>
+                  <h3>Leitura gerencial</h3>
+                  <p>Resumo automático do que merece atenção no filtro.</p>
+                </div>
+                <span>Análise</span>
+              </div>
+              <div className="dashboard-insight-list">
+                {currentMetrics.executiveInsights.map((item) => (
+                  <div key={item.id} className={`dashboard-insight-item is-${item.tone}`}>
+                    <strong>{item.title}</strong>
+                    <small>{item.description}</small>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
           <div className="dashboard-section">
             <div className="dashboard-charts-grid">
               {renderExpandableCard(expandedConfigs.status, renderStatusChart(CHART_HEIGHT_CARD))}
@@ -1808,6 +2238,7 @@ const Dashboard: React.FC = () => {
 
           <div className="dashboard-section">
             <div className="dashboard-charts-grid dashboard-charts-grid--three">
+              {renderExpandableCard(expandedConfigs.bairros, renderBairroChart(CHART_HEIGHT_CARD))}
               {activeTab === "geral" && renderExpandableCard(expandedConfigs.modulos, renderModulesChart(CHART_HEIGHT_CARD))}
               {renderExpandableCard(
                 expandedConfigs.produtividade,
@@ -1847,6 +2278,14 @@ const Dashboard: React.FC = () => {
       )}
 
       <div className="dashboard-print-container screen-only">
+        <button
+          type="button"
+          className="dashboard-report-button"
+          onClick={handleGenerateManagerReport}
+          disabled={isGeneratingReport}
+        >
+          {isGeneratingReport ? "Gerando PDF..." : "📄 Gerar PDF gerencial"}
+        </button>
         <button type="button" className="dashboard-print-button" onClick={handlePrintDashboard}>🖨 Imprimir dashboard</button>
       </div>
 

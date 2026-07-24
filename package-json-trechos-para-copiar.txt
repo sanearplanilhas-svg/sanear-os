@@ -1,0 +1,29 @@
+No seu package.json, adicione estes scripts dentro de "scripts":
+
+  "test:e2e": "playwright test",
+  "test:e2e:headed": "playwright test --headed",
+  "test:e2e:ui": "playwright test --ui",
+  "test:e2e:install": "playwright install chromium",
+
+Exemplo:
+
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "eslint .",
+    "check:clean": "node scripts/check-project-clean.mjs",
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:install": "playwright install chromium",
+    "preview": "vite preview"
+  }
+
+Adicione tambem esta dependencia dentro de "devDependencies":
+
+  "@playwright/test": "^1.57.0",
+
+Depois rode:
+
+  npm install
+  powershell -ExecutionPolicy Bypass -File .\scripts\teste-telas.ps1
