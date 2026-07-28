@@ -43,6 +43,7 @@ type ModuleKey =
 type RealModuleKey = Exclude<ModuleKey, "geral" | "esgotoRetornando" | "esgotoEntupido">;
 type FutureModuleKey = "esgotoRetornando" | "esgotoEntupido";
 type DashboardTab = ModuleKey;
+type DashboardPerfilUsuario = "diretor" | "operador" | "terceirizada" | "adm";
 type FilterPreset = "hoje" | "7dias" | "30dias" | "mes" | "tudo" | "personalizado";
 type ExpandedCardId = "status" | "sla" | "modulos" | "produtividade" | "caminhao" | "bairros";
 type ServiceArea = "TERCEIRIZADA" | "SERVICO_SANEAR" | "IMPLANTACAO";
@@ -168,6 +169,10 @@ type ExpandedCardConfig = {
 type ResumoNumericoProps = {
   titulo?: string;
   linhas: string[];
+};
+
+type DashboardProps = {
+  perfilUsuario?: DashboardPerfilUsuario;
 };
 
 const CHART_HEIGHT_CARD = 285;
@@ -930,7 +935,8 @@ const ChartEmptyState: React.FC<{ message: string }> = ({ message }) => (
   <div className="dashboard-chart-empty">{message}</div>
 );
 
-const Dashboard: React.FC = () => {
+const Dashboard: React.FC<DashboardProps> = ({ perfilUsuario = "operador" }) => {
+  const isTerceirizada = perfilUsuario === "terceirizada";
   const [ordensCalcamento, setOrdensCalcamento] = useState<DashboardOrder[]>([]);
   const [ordensAsfalto, setOrdensAsfalto] = useState<DashboardOrder[]>([]);
   const [ordensHidrojato, setOrdensHidrojato] = useState<DashboardOrder[]>([]);
@@ -960,6 +966,13 @@ const Dashboard: React.FC = () => {
     const timer = window.setInterval(() => setNow(new Date()), 60_000);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (!isTerceirizada) return;
+    if (activeTab !== "geral" && activeTab !== "calcamento" && activeTab !== "asfalto") {
+      setActiveTab("geral");
+    }
+  }, [activeTab, isTerceirizada]);
 
   useEffect(() => {
     if (expandedCard || isFilterOpen) {
@@ -1058,6 +1071,12 @@ const Dashboard: React.FC = () => {
   }, []);
 
   useEffect(() => {
+    if (isTerceirizada) {
+      setOrdensHidrojato([]);
+      setLoadingHidrojato(false);
+      return;
+    }
+
     const qHidrojato = query(
       collection(db, "ordensHidrojato"),
       orderBy("createdAt", "desc")
@@ -1082,7 +1101,7 @@ const Dashboard: React.FC = () => {
     );
 
     return unsubscribe;
-  }, []);
+  }, [isTerceirizada]);
 
   const startDate = useMemo(() => parseDateInput(filterStartDate), [filterStartDate]);
   const endDate = useMemo(() => parseDateInput(filterEndDate, true), [filterEndDate]);
@@ -1091,6 +1110,16 @@ const Dashboard: React.FC = () => {
   const allOrders = useMemo(
     () => [...ordensCalcamento, ...ordensAsfalto, ...ordensHidrojato],
     [ordensCalcamento, ordensAsfalto, ordensHidrojato]
+  );
+
+  const visibleTabKeys = useMemo<DashboardTab[]>(
+    () => (isTerceirizada ? ["geral", "calcamento", "asfalto"] : TAB_KEYS),
+    [isTerceirizada]
+  );
+
+  const moduleSummaryKeys = useMemo<(RealModuleKey | FutureModuleKey)[]>(
+    () => (isTerceirizada ? ["calcamento", "asfalto"] : [...REAL_MODULE_KEYS, ...FUTURE_MODULE_KEYS]),
+    [isTerceirizada]
   );
 
   const selectedOrders = useMemo(() => {
@@ -1113,15 +1142,24 @@ const Dashboard: React.FC = () => {
 
   const moduleSummaries = useMemo(
     () =>
-      [...REAL_MODULE_KEYS, ...FUTURE_MODULE_KEYS].map((key) =>
+      moduleSummaryKeys.map((key) =>
         buildModuleSummary(key, allOrders, startDate, endDate, referenceDate)
       ),
-    [allOrders, startDate, endDate, referenceDate]
+    [allOrders, moduleSummaryKeys, startDate, endDate, referenceDate]
   );
 
   const header = useMemo(() => {
     const config = MODULE_CONFIG[activeTab];
     if (activeTab === "geral") {
+      if (isTerceirizada) {
+        return {
+          title: "Dashboard da terceirizada",
+          eyebrow: "Execução externa",
+          description:
+            "Resumo operacional das OS de Calçamento e Asfalto liberadas para execução externa.",
+        };
+      }
+
       return {
         title: "Central operacional SANEAR",
         eyebrow: "Dashboard executivo",
@@ -1135,7 +1173,7 @@ const Dashboard: React.FC = () => {
       eyebrow: config.areaLabel,
       description: config.description,
     };
-  }, [activeTab]);
+  }, [activeTab, isTerceirizada]);
 
   const filterRangeLabel = useMemo(() => {
     const start = parseDateInput(filterStartDate);
@@ -1687,9 +1725,19 @@ const Dashboard: React.FC = () => {
           <h2>{header.title}</h2>
           <p>{header.description}</p>
           <div className="dashboard-hero-tags screen-only">
-            <span>Terceirizada: Calçamento e Asfalto</span>
-            <span>Serviço SANEAR: Hidrojato</span>
-            <span>Esgoto: reservado para implantação</span>
+            {isTerceirizada ? (
+              <>
+                <span>Visão liberada para terceirizada</span>
+                <span>Calçamento e Asfalto</span>
+                <span>Sem acesso administrativo</span>
+              </>
+            ) : (
+              <>
+                <span>Terceirizada: Calçamento e Asfalto</span>
+                <span>Serviço SANEAR: Hidrojato</span>
+                <span>Esgoto: reservado para implantação</span>
+              </>
+            )}
           </div>
         </div>
         <div className="dashboard-command-card">
@@ -1946,7 +1994,7 @@ const Dashboard: React.FC = () => {
       )}
 
       <div className="page-tabs dashboard-tabs screen-only" role="tablist">
-        {TAB_KEYS.map((value) => {
+        {visibleTabKeys.map((value) => {
           const config = MODULE_CONFIG[value];
           return (
             <button
@@ -2277,17 +2325,19 @@ const Dashboard: React.FC = () => {
         </>
       )}
 
-      <div className="dashboard-print-container screen-only">
-        <button
-          type="button"
-          className="dashboard-report-button"
-          onClick={handleGenerateManagerReport}
-          disabled={isGeneratingReport}
-        >
-          {isGeneratingReport ? "Gerando PDF..." : "📄 Gerar PDF gerencial"}
-        </button>
-        <button type="button" className="dashboard-print-button" onClick={handlePrintDashboard}>🖨 Imprimir dashboard</button>
-      </div>
+      {!isTerceirizada && (
+        <div className="dashboard-print-container screen-only">
+          <button
+            type="button"
+            className="dashboard-report-button"
+            onClick={handleGenerateManagerReport}
+            disabled={isGeneratingReport}
+          >
+            {isGeneratingReport ? "Gerando PDF..." : "📄 Gerar PDF gerencial"}
+          </button>
+          <button type="button" className="dashboard-print-button" onClick={handlePrintDashboard}>🖨 Imprimir dashboard</button>
+        </div>
+      )}
 
       {expandedCard && (
         <div className="dashboard-modal-backdrop" onClick={closeExpanded}>

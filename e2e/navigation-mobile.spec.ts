@@ -35,12 +35,18 @@ test.describe("Navegacao mobile", () => {
   test("terceirizada usa barra inferior limitada", async ({ page }) => {
     await loginAs(page, "terceirizada");
 
-    await expectTopbarTitle(page, "Visão da Terceirizada");
+    // Com a nova permissao, a terceirizada agora inicia no Dashboard.
+    await expectTopbarTitle(page, "Dashboard");
+
     const mobileNav = page.locator(".mobile-bottom-nav");
+    await expect(mobileNav.getByRole("button", { name: "Painel", exact: true })).toBeVisible();
     await expect(mobileNav.getByRole("button", { name: "Área", exact: true })).toBeVisible();
     await expect(mobileNav.getByRole("button", { name: "Anexos", exact: true })).toBeVisible();
     await expect(mobileNav.getByRole("button", { name: "Notificações" })).toBeVisible();
     await expect(mobileNav.getByRole("button", { name: "Sair" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Abrir nova ordem de serviço" })).toHaveCount(0);
+
+    await mobileNav.getByRole("button", { name: "Área", exact: true }).click();
+    await expectTopbarTitle(page, "Visão da Terceirizada");
   });
 });

@@ -1,7 +1,7 @@
 // E2E NIVEL 5 ESTAVEL V27 - valida finalizacao por Firestore/Supabase, sem login admin final
 import { expect, type Page, test } from "@playwright/test";
 import path from "node:path";
-import { credentialsFor, expectTopbarTitle, loginAs, writeTestsEnabled } from "./helpers";
+import { credentialsFor, expectTopbarTitle, goToSidebar, loginAs, writeTestsEnabled } from "./helpers";
 
 type CollectionName = "ordens_servico";
 
@@ -392,6 +392,14 @@ async function listarPendentesLocaisNivel5(page: Page) {
 
 async function openTemporaryOrderInTerceirizada(page: Page, protocolo: string) {
   await loginAs(page, "terceirizada");
+
+  // Depois que a terceirizada passou a ter acesso ao Dashboard,
+  // ela pode iniciar no Painel. Para finalizar OS, o teste
+  // entra explicitamente na Área da Terceirizada.
+  if ((await page.locator(".topbar-page-title").innerText().catch(() => "")) !== "Visão da Terceirizada") {
+    await goToSidebar(page, "Área da Terceirizada");
+  }
+
   await expectTopbarTitle(page, "Visão da Terceirizada");
 
   const search = page.getByPlaceholder(/Buscar por protocolo/i);

@@ -712,6 +712,7 @@ const App: React.FC = () => {
     if (profileLoading) return;
     if (
       simulatedRole === "terceirizada" &&
+      activeMenu !== "dashboard" &&
       activeMenu !== "terceirizada" &&
       activeMenu !== "anexos_pendentes"
     ) {
@@ -1088,13 +1089,18 @@ useEffect(() => {
   }
 
   function renderActivePage() {
-    if (simulatedRole === "terceirizada" && activeMenu !== "terceirizada" && activeMenu !== "anexos_pendentes") {
+    if (
+      simulatedRole === "terceirizada" &&
+      activeMenu !== "dashboard" &&
+      activeMenu !== "terceirizada" &&
+      activeMenu !== "anexos_pendentes"
+    ) {
       return <TerceirizadaVisao />;
     }
 
     switch (activeMenu) {
       case "dashboard":
-        return <Dashboard />;
+        return <Dashboard perfilUsuario={simulatedRole} />;
       case "alertas":
         return <AlertasOperacionais />;
       case "buraco":
@@ -1137,7 +1143,7 @@ useEffect(() => {
     }
 
     return (
-      <Suspense fallback={<PageLoadingFallback title={simulatedRole === "terceirizada" ? "Visão da Terceirizada" : pageMeta.title} />}>
+      <Suspense fallback={<PageLoadingFallback title={pageMeta.title} />}>
         {renderActivePage()}
       </Suspense>
     );
@@ -1660,6 +1666,12 @@ useEffect(() => {
       <nav className="mobile-bottom-nav" aria-label="Navegação principal no celular">
         {isTerceirizada ? (
           <>
+            <MobileNavButton
+              menu="dashboard"
+              icon="📊"
+              label="Painel"
+              badge={unreadCount > 0 ? unreadCount > 99 ? "99+" : unreadCount : undefined}
+            />
             <MobileNavButton menu="terceirizada" icon="🤝" label="Área" />
             <MobileNavButton
               menu="anexos_pendentes"
